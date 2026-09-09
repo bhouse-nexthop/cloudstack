@@ -105,6 +105,8 @@ public class FirstFitAllocator extends AdapterBase implements HostAllocator {
     @Inject
     CapacityDao _capacityDao;
     @Inject
+    WeightedHostScorer weightedHostScorer;
+    @Inject
     VMInstanceDetailsDao _vmInstanceDetailsDao;
     @Inject
     private VgpuProfileDao vgpuProfileDao;
@@ -305,6 +307,8 @@ public class FirstFitAllocator extends AdapterBase implements HostAllocator {
             hosts = reorderHostsByNumberOfVms(plan, hosts, account);
         } else if(vmAllocationAlgorithm.equals("firstfitleastconsumed")){
             hosts = reorderHostsByCapacity(plan, hosts);
+        } else if (vmAllocationAlgorithm.equals("balancedweighted")) {
+            hosts = weightedHostScorer.rank(plan.getDataCenterId(), plan.getPodId(), plan.getClusterId(), hosts);
         }
 
         if (logger.isDebugEnabled()) {
