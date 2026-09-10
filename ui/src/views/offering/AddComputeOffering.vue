@@ -152,6 +152,34 @@
             </a-form-item>
           </a-col>
         </a-row>
+        <a-row :gutter="12" v-if="isAdmin()">
+          <a-col :md="12" :lg="12">
+            <a-form-item name="cpuovercommitratio" ref="cpuovercommitratio">
+              <template #label>
+                <tooltip-label :title="$t('label.cpuovercommitratio')" :tooltip="$t('label.cpuovercommitratio.tooltip')"/>
+              </template>
+              <a-input
+                v-model:value="form.cpuovercommitratio"
+                type="number"
+                min="1"
+                step="0.1"
+                :placeholder="$t('message.overcommit.ratio.inherit.cluster')"/>
+            </a-form-item>
+          </a-col>
+          <a-col :md="12" :lg="12">
+            <a-form-item name="memoryovercommitratio" ref="memoryovercommitratio">
+              <template #label>
+                <tooltip-label :title="$t('label.memoryovercommitratio')" :tooltip="$t('label.memoryovercommitratio.tooltip')"/>
+              </template>
+              <a-input
+                v-model:value="form.memoryovercommitratio"
+                type="number"
+                min="1"
+                step="0.1"
+                :placeholder="$t('message.overcommit.ratio.inherit.cluster')"/>
+            </a-form-item>
+          </a-col>
+        </a-row>
         <a-row :gutter="12">
           <a-col :md="12" :lg="12">
             <a-form-item v-if="isAdmin() || isDomainAdminAllowedToInformTags" name="hosttags" ref="hosttags">
@@ -704,6 +732,15 @@ export default {
           return Promise.resolve()
         }
       },
+      overCommitRatioRule: {
+        type: 'number',
+        validator: async (rule, value) => {
+          if (value && (isNaN(value) || value < 1)) {
+            return Promise.reject(this.$t('message.error.overcommit.ratio'))
+          }
+          return Promise.resolve()
+        }
+      },
       storageType: 'shared',
       provisioningType: 'thin',
       cacheMode: 'none',
@@ -821,6 +858,8 @@ export default {
           { required: true, message: this.$t('message.error.required.input') },
           this.naturalNumberRule
         ],
+        cpuovercommitratio: [this.overCommitRatioRule],
+        memoryovercommitratio: [this.overCommitRatioRule],
         networkrate: [this.naturalNumberRule],
         rootdisksize: [this.naturalNumberRule],
         diskbytesreadrate: [this.naturalNumberRule],
@@ -1167,13 +1206,25 @@ export default {
           values.deploymentplanner != null && values.deploymentplanner.length > 0) {
           params.deploymentplanner = values.deploymentplanner
         }
+        var detailIndex = 0
         if ('deploymentplanner' in values &&
           values.deploymentplanner !== undefined &&
           values.deploymentplanner === 'ImplicitDedicationPlanner' &&
           values.plannermode !== undefined &&
           values.plannermode !== '') {
-          params['serviceofferingdetails[0].key'] = 'ImplicitDedicationMode'
-          params['serviceofferingdetails[0].value'] = values.plannermode
+          params['serviceofferingdetails[' + detailIndex + '].key'] = 'ImplicitDedicationMode'
+          params['serviceofferingdetails[' + detailIndex + '].value'] = values.plannermode
+          detailIndex++
+        }
+        if (values.cpuovercommitratio !== undefined && values.cpuovercommitratio !== null && values.cpuovercommitratio !== '') {
+          params['serviceofferingdetails[' + detailIndex + '].key'] = 'cpuOvercommitRatio'
+          params['serviceofferingdetails[' + detailIndex + '].value'] = values.cpuovercommitratio
+          detailIndex++
+        }
+        if (values.memoryovercommitratio !== undefined && values.memoryovercommitratio !== null && values.memoryovercommitratio !== '') {
+          params['serviceofferingdetails[' + detailIndex + '].key'] = 'memoryOvercommitRatio'
+          params['serviceofferingdetails[' + detailIndex + '].value'] = values.memoryovercommitratio
+          detailIndex++
         }
         if ('isvolatile' in values && values.isvolatile !== undefined) {
           params.isvolatile = values.isvolatile === true
