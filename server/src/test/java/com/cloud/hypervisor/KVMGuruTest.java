@@ -36,6 +36,7 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
@@ -67,6 +68,7 @@ import com.cloud.storage.dao.GuestOSHypervisorDao;
 import com.cloud.utils.Pair;
 import com.cloud.vm.dao.VMInstanceDao;
 import com.cloud.vm.VMInstanceVO;
+import com.cloud.vm.VmDetailConstants;
 import com.cloud.vm.VirtualMachine;
 import com.cloud.vm.VirtualMachineProfile;
 
@@ -638,5 +640,81 @@ public class KVMGuruTest {
         Mockito.verify(_volumeDao).attachVolume(10L, 42L, 0L);
         // device id 4 is reserved, so the volume gets the next free one
         Mockito.verify(_volumeDao).attachVolume(11L, 42L, 5L);
+    }
+
+    private VirtualMachineTO systemVmTO(int cpus, Map<String, String> details) {
+        VirtualMachineTO to = Mockito.mock(VirtualMachineTO.class);
+        Mockito.when(to.getType()).thenReturn(VirtualMachine.Type.DomainRouter);
+        Mockito.when(to.getCpus()).thenReturn(cpus);
+        Mockito.when(to.getDetails()).thenReturn(details);
+        return to;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, String> capturedDetails(VirtualMachineTO to) {
+        ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
+        Mockito.verify(to).setDetails(captor.capture());
+        return captor.getValue();
+    }
+
+    @Test
+    public void testSystemVmGetsAQueuePerCpu() {
+        VirtualMachineTO to = systemVmTO(4, null);
+
+        guru.addDefaultNicQueuesForSystemVm(to);
+
+        Assert.assertEquals("4", capturedDetails(to).get(VmDetailConstants.NIC_MULTIQUEUE_NUMBER));
+    }
+
+    @Test
+    public void testSystemVmQueuesStopAtTheTapLimit() {
+        VirtualMachineTO to = systemVmTO(512, null);
+
+        guru.addDefaultNicQueuesForSystemVm(to);
+
+        Assert.assertEquals("256", capturedDetails(to).get(VmDetailConstants.NIC_MULTIQUEUE_NUMBER));
+    }
+
+    @Test
+    public void testSingleCpuSystemVmIsLeftAlone() {
+        VirtualMachineTO to = systemVmTO(1, null);
+
+        guru.addDefaultNicQueuesForSystemVm(to);
+
+        Mockito.verify(to, Mockito.never()).setDetails(Mockito.anyMap());
+    }
+
+    @Test
+    public void testExistingDetailsAreKept() {
+        Map<String, String> existing = new HashMap<>();
+        existing.put(VmDetailConstants.ROOT_DISK_CONTROLLER, "virtio");
+        VirtualMachineTO to = systemVmTO(4, existing);
+
+        guru.addDefaultNicQueuesForSystemVm(to);
+
+        Map<String, String> details = capturedDetails(to);
+        Assert.assertEquals("4", details.get(VmDetailConstants.NIC_MULTIQUEUE_NUMBER));
+        Assert.assertEquals("virtio", details.get(VmDetailConstants.ROOT_DISK_CONTROLLER));
+    }
+
+    @Test
+    public void testAQueueNumberAlreadySetWins() {
+        Map<String, String> set = new HashMap<>();
+        set.put(VmDetailConstants.NIC_MULTIQUEUE_NUMBER, "2");
+        VirtualMachineTO to = systemVmTO(8, set);
+
+        guru.addDefaultNicQueuesForSystemVm(to);
+
+        Mockito.verify(to, Mockito.never()).setDetails(Mockito.anyMap());
+    }
+
+    @Test
+    public void testUserVmsAreNotTouched() {
+        VirtualMachineTO to = Mockito.mock(VirtualMachineTO.class);
+        Mockito.when(to.getType()).thenReturn(VirtualMachine.Type.User);
+
+        guru.addDefaultNicQueuesForSystemVm(to);
+
+        Mockito.verify(to, Mockito.never()).setDetails(Mockito.anyMap());
     }
 }
