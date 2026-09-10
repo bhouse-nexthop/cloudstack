@@ -52,9 +52,14 @@ jobs:
 
       - name: Install build dependencies
         run: |
+          # dpkg-checkbuilddeps reads the apt database, so everything in debian/control's
+          # Build-Depends has to be a real package. Toolchains put on PATH by setup-java or
+          # setup-node do not satisfy it.
+          curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential devscripts debhelper lsb-release genisoimage jq \
+            maven nodejs \
             python3-mysql.connector python3-setuptools \
             libws-commons-util-java libcommons-codec-java libcommons-httpclient-java
 
@@ -64,10 +69,13 @@ jobs:
           distribution: temurin
           java-version: '11'
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - name: Confirm the build dependencies are actually satisfied
+        run: |
+          # fail here, in two seconds, rather than after a long build
+          dpkg-checkbuilddeps
+          echo "java:  $(java -version 2>&1 | head -1)"
+          echo "maven: $(mvn -v | head -1)"
+          echo "node:  $(node --version)"
 
       - name: Cache Maven repository
         uses: actions/cache@v4
