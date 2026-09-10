@@ -17,6 +17,7 @@
 
 package com.cloud.network.lb;
 
+import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.exception.ResourceUnavailableException;
 import com.cloud.network.Network;
 import com.cloud.network.NetworkModel;
@@ -307,5 +308,17 @@ public class LoadBalancingRulesManagerImplTest{
         Mockito.verify(lbr, times(1)).applyLoadBalancerConfig(lbRuleId);
         Mockito.verify(loadBalancerMock, times(1)).setLbProtocol(NetUtils.TCP_PROTO);
         Mockito.verify(loadBalancerMock, times(1)).setLbProtocol(NetUtils.SSL_PROTO);
+    }
+
+    @Test
+    public void testValidateConnectionTimeoutAcceptsZeroAndAbove() {
+        lbr.validateConnectionTimeout(ApiConstants.IDLE_TIMEOUT, null);
+        lbr.validateConnectionTimeout(ApiConstants.IDLE_TIMEOUT, 0L);
+        lbr.validateConnectionTimeout(ApiConstants.IDLE_TIMEOUT, 600000L);
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
+    public void testValidateConnectionTimeoutRejectsNegative() {
+        lbr.validateConnectionTimeout(ApiConstants.IDLE_TIMEOUT, -1L);
     }
 }
