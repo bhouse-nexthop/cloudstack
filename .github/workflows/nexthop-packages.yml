@@ -110,23 +110,41 @@ jobs:
             --use-timestamp \
             --output-directory "${GITHUB_WORKSPACE}/dist"
 
-      - name: Summarise what was built
+      - name: Separate the packages we deploy from the rest
         run: |
-          ls -lh dist/*.deb
+          # dpkg-buildpackage builds everything debian/control declares. Only the packages that
+          # actually go on a host are archived; docs, marvin and the integration tests are build
+          # by-products we never install.
+          mkdir -p dist/deploy
+          for p in common management agent usage ui; do
+            mv dist/cloudstack-${p}_*.deb dist/deploy/
+          done
+
           {
+            echo "### Archived"
+            echo
             echo "| Package | Size |"
             echo "|---|---|"
-            for f in dist/*.deb; do
+            for f in dist/deploy/*.deb; do
               echo "| \`$(basename "$f")\` | $(du -h "$f" | cut -f1) |"
             done
+            echo
+            echo "### Built but not archived"
+            echo
+            for f in dist/*.deb; do
+              [ -f "$f" ] && echo "- \`$(basename "$f")\`"
+            done
           } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Archiving:"; ls -1 dist/deploy/
+          echo "Discarding:"; ls -1 dist/*.deb 2>/dev/null || true
 
       - name: Check the non-free plugins actually made it in
         run: |
           # -Dnoredist quietly having no effect is the failure mode worth catching: the packages
           # build and install fine and the features are simply absent. The plugin classes are
           # shaded into the client jar rather than shipped as separate jars, so look inside it.
-          mkdir -p /tmp/mgmt && dpkg-deb -x dist/cloudstack-management_*.deb /tmp/mgmt
+          mkdir -p /tmp/mgmt && dpkg-deb -x dist/deploy/cloudstack-management_*.deb /tmp/mgmt
           jar=$(find /tmp/mgmt -name 'cloudstack-*.jar' | head -1)
           echo "Inspecting $(basename "$jar")"
 
@@ -149,6 +167,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cloudstack-deb-${{ github.sha }}
-          path: dist/*.deb
+          path: dist/deploy/*.deb
           retention-days: 30
           if-no-files-found: error
