@@ -37,7 +37,7 @@ on:
   push:
     branches:
       - 'nexthop/**'
-      - '4.22-nexthop'
+      - '*-nexthop'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
