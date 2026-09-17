@@ -54,8 +54,10 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
         with:
-          # build-deb.sh reads the branch name and rewrites poms; it needs real history
+          # build-deb.sh reads the branch name and rewrites poms; it needs real history.
+          # The tag is what the package revision is counted from, so fetch tags too.
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Reclaim runner disk
         run: |
@@ -121,10 +123,26 @@ jobs:
           NODE_OPTIONS: --openssl-legacy-provider
           ACS_BUILD_OPTS: -DskipTests -Dnoredist -Dnonoss -T 1C
         run: |
+          # build-deb.sh takes the version from the first line of debian/changelog, and
+          # --use-timestamp only does anything when that version contains SNAPSHOT. This
+          # branch is based on a release tag, so passing --use-timestamp skipped the
+          # branding as well: every build produced cloudstack-management_4.22.1.1~noble,
+          # indistinguishable from a stock Apache package and from every other build of
+          # this branch. Count the commits since the base tag and pass that as the brand.
+          base=$(head -n1 debian/changelog | awk -F '[()]' '{print $2}')
+          if git rev-parse --verify -q "refs/tags/${base}" >/dev/null; then
+            rev=$(git rev-list --count "refs/tags/${base}..HEAD")
+          else
+            echo "No ${base} tag in this checkout, numbering from the start of history"
+            rev=$(git rev-list --count HEAD)
+          fi
+          # dots, not dashes: the last dash in a Debian version starts the revision field
+          brand="${{ inputs.brand || 'nexthop' }}.${rev}.g$(git rev-parse --short HEAD)"
+          echo "Building ${base}-${brand}"
+          echo "Building \`${base}-${brand}\`" >> "$GITHUB_STEP_SUMMARY"
           cd packaging
           ./build-deb.sh \
-            --brand "${{ inputs.brand || 'nexthop' }}" \
-            --use-timestamp \
+            --brand "$brand" \
             --output-directory "${GITHUB_WORKSPACE}/dist"
 
       - name: Separate the packages we deploy from the rest
