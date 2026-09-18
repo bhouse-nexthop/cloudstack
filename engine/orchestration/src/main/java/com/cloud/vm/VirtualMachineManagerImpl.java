@@ -5612,7 +5612,7 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
                         vm.getInstanceName(), powerHostId, vm.getState()));
     }
 
-    private void handlePowerOffReportWithNoPendingJobsOnVM(final VMInstanceVO vm) {
+    protected void handlePowerOffReportWithNoPendingJobsOnVM(final VMInstanceVO vm) {
         switch (vm.getState()) {
         case Starting:
         case Stopping:
@@ -5640,9 +5640,15 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
             // on the host before giving up its resources, otherwise a still-running instance keeps its NICs and IP
             // addresses while the database says they are free and they get handed to another instance.
             if (PowerState.PowerOff.equals(vm.getPowerState()) || PowerState.PowerReportMissing.equals(vm.getPowerState())) {
+                // force is false for a missing report. sendStop() swallows AgentUnavailableException and
+                // OperationTimedoutException and answers success when forced, and a host too busy to answer is
+                // exactly the condition that produced the stale report in the first place. Backing off and letting a
+                // later report decide is better than freeing an address on no evidence. A PowerOff report is the
+                // host stating the instance is down, so that path keeps its previous behaviour.
+                final boolean forceStop = PowerState.PowerOff.equals(vm.getPowerState());
                 final VirtualMachineGuru vmGuru = getVmGuru(vm);
                 final VirtualMachineProfile profile = new VirtualMachineProfileImpl(vm);
-                if (!sendStop(vmGuru, profile, true, true)) {
+                if (!sendStop(vmGuru, profile, forceStop, true)) {
                     logger.warn("Unable to stop VM {} on its host, not releasing its resources.", vm);
                     return;
                 } else {
