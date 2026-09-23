@@ -2016,7 +2016,7 @@ public class VirtualMachineManagerImplTest {
         when(vmInstanceMock.getState()).thenReturn(VirtualMachine.State.Migrating);
         when(vmInstanceMock.getPowerState()).thenReturn(VirtualMachine.PowerState.PowerReportMissing);
         doReturn(mock(VirtualMachineGuru.class)).when(virtualMachineManagerImpl).getVmGuru(any());
-        doReturn(new Pair<>(false, "host did not answer")).when(virtualMachineManagerImpl)
+        doReturn(false).when(virtualMachineManagerImpl)
                 .sendStop(any(), any(), eq(false), eq(true));
 
         virtualMachineManagerImpl.handlePowerOffReportWithNoPendingJobsOnVM(vmInstanceMock);
@@ -2033,7 +2033,7 @@ public class VirtualMachineManagerImplTest {
         when(vmInstanceMock.getState()).thenReturn(VirtualMachine.State.Migrating);
         when(vmInstanceMock.getPowerState()).thenReturn(VirtualMachine.PowerState.PowerOff);
         doReturn(mock(VirtualMachineGuru.class)).when(virtualMachineManagerImpl).getVmGuru(any());
-        doReturn(new Pair<>(false, "host did not answer")).when(virtualMachineManagerImpl)
+        doReturn(false).when(virtualMachineManagerImpl)
                 .sendStop(any(), any(), eq(true), eq(true));
 
         virtualMachineManagerImpl.handlePowerOffReportWithNoPendingJobsOnVM(vmInstanceMock);
