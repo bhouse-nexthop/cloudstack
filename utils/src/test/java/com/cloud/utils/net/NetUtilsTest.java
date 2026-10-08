@@ -970,4 +970,19 @@ public class NetUtilsTest {
         assertEquals("99999999999", NetUtils.icmpProtocolNumberAsName("99999999999"));
         Assert.assertNull(NetUtils.icmpProtocolNumberAsName(null));
     }
+
+    @Test
+    public void testIsProtocolInList() {
+        assertTrue(NetUtils.isProtocolInList("tcp,udp,icmp,all", "tcp"));
+        assertTrue(NetUtils.isProtocolInList("tcp,udp,icmp,all", "ICMP"));
+        // provider capabilities with a space after the comma
+        assertTrue(NetUtils.isProtocolInList("tcp,udp,icmp, all", "all"));
+        assertTrue(NetUtils.isProtocolInList("tcp, udp", "udp"));
+        // part of an entry, or of the list, is not an entry
+        for (String protocol : new String[] {"cp", "t", "dp,ic", ",", "tcp,udp", "", "proxy", " all"}) {
+            assertFalse(protocol, NetUtils.isProtocolInList("tcp,udp,icmp,all,tcp-proxy", protocol));
+        }
+        assertFalse(NetUtils.isProtocolInList(null, "tcp"));
+        assertFalse(NetUtils.isProtocolInList("tcp", null));
+    }
 }
