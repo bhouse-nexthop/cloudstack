@@ -2529,6 +2529,23 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
     }
 
     /**
+     * A Migrating instance has its hostId set to the destination and its lastHostId to the source. Until the
+     * migration settles either host may be running it, and a StopCommand only goes to the destination.
+     *
+     * @return the source host of a migration in progress when that host is not gone, otherwise null
+     */
+    protected Long migrationSourceThatMayBeRunningIt(final VMInstanceVO vm) {
+        if (vm.getState() != State.Migrating) {
+            return null;
+        }
+        final Long sourceHostId = vm.getLastHostId();
+        if (sourceHostId == null || sourceHostId.equals(vm.getHostId()) || isHostGone(sourceHostId)) {
+            return null;
+        }
+        return sourceHostId;
+    }
+
+    /**
      * Whether a stop may release an instance's resources without the host confirming the instance is stopped.
      */
     protected boolean mayReleaseWithoutHostConfirmation(final VMInstanceVO vm, final boolean cleanUpEvenIfUnableToStop, final boolean releaseOnlyIfHostIsGone) {
@@ -2665,6 +2682,13 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
             }
             // cleanup() releases the resources whether or not the host answers. For a destroy on a host that is not
             // gone, go ahead only once the host has confirmed the instance is stopped.
+            final Long migrationSourceHostId = releaseOnlyIfHostIsGone ? migrationSourceThatMayBeRunningIt(vm) : null;
+            if (migrationSourceHostId != null) {
+                logger.warn("Not releasing the resources of {} in state {}: the host it is migrating from, {}, may still be running it.",
+                        vm, vm.getState(), migrationSourceHostId);
+                throw new CloudRuntimeException("Unable to stop " + vm + " in state " + vm.getState()
+                        + ": the host it is migrating from may still be running it");
+            }
             if (releaseOnlyIfHostIsGone && !isHostGone(vm.getHostId())) {
                 if (!sendStop(vmGuru, profile, false, false)) {
                     logger.warn("Not releasing the resources of {} in state {}: its host did not confirm the instance is stopped.", vm, vm.getState());
