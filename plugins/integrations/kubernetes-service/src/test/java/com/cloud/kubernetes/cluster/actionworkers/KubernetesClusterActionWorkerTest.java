@@ -586,4 +586,19 @@ public class KubernetesClusterActionWorkerTest {
         Assert.assertTrue(config.contains("K8S_VERSION=\"1.33.1\""));
         Assert.assertFalse(config.contains("{{ k8s.version }}"));
     }
+
+    @Test
+    public void testUpdateKubeConfigWithRegistryDetailsControlNodeWritesSetupScript() throws IOException {
+        List<KubernetesClusterDetailsVO> details = Arrays.asList(
+                new KubernetesClusterDetailsVO(DEFAULT_ID, ApiConstants.DOCKER_REGISTRY_USER_NAME, "user", true),
+                new KubernetesClusterDetailsVO(DEFAULT_ID, ApiConstants.DOCKER_REGISTRY_PASSWORD, "pass", false),
+                new KubernetesClusterDetailsVO(DEFAULT_ID, ApiConstants.DOCKER_REGISTRY_URL, "https://index.docker.io/v1/", true));
+        Mockito.when(kubernetesClusterDetailsDao.listDetails(DEFAULT_ID)).thenReturn(details);
+        String config = actionWorker.updateKubeConfigWithRegistryDetails(actionWorker.readResourceFile("conf/k8s-control-node.yml"));
+        Assert.assertTrue(config.startsWith("#cloud-config"));
+        Assert.assertFalse(config.contains("{%"));
+        Assert.assertTrue(config.contains("- path: /opt/bin/setup-containerd"));
+        Assert.assertTrue(config.contains("- bash -x /opt/bin/setup-containerd"));
+        Assert.assertTrue(config.contains("registry.mirrors.\\\"index.docker.io/v1/\\\""));
+    }
 }
