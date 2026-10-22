@@ -970,4 +970,19 @@ public class NetUtilsTest {
         assertFalse(NetUtils.isProtocolInList(null, "tcp"));
         assertFalse(NetUtils.isProtocolInList("tcp", null));
     }
+
+    @Test
+    public void icmpProtocolNumberAsNameTurnsProtocolNumberOneIntoIcmp() {
+        assertEquals(NetUtils.ICMP_PROTO, NetUtils.icmpProtocolNumberAsName("1"));
+        assertEquals(NetUtils.ICMP_PROTO, NetUtils.icmpProtocolNumberAsName(" 1 "));
+        assertEquals(NetUtils.ICMP_PROTO, NetUtils.icmpProtocolNumberAsName("01"));
+    }
+
+    @Test
+    public void icmpProtocolNumberAsNameLeavesOtherProtocolsTrimmed() {
+        assertEquals("tcp", NetUtils.icmpProtocolNumberAsName(" tcp "));
+        assertEquals("47", NetUtils.icmpProtocolNumberAsName("47"));
+        assertEquals("99999999999", NetUtils.icmpProtocolNumberAsName("99999999999"));
+        Assert.assertNull(NetUtils.icmpProtocolNumberAsName(null));
+    }
 }
