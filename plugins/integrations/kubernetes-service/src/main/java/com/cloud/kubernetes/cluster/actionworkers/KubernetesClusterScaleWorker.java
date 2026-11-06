@@ -21,6 +21,7 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -61,6 +62,8 @@ import com.cloud.utils.Pair;
 import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.utils.ssh.SshHelper;
 import com.cloud.vm.UserVmVO;
+import com.cloud.vm.VMInstanceVO;
+import com.cloud.vm.VirtualMachine;
 import org.apache.logging.log4j.Level;
 
 import static com.cloud.kubernetes.cluster.KubernetesServiceHelper.KubernetesClusterNodeType.CONTROL;
@@ -287,24 +290,28 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
         if (StringUtils.isNotEmpty(hostName)) {
             hostName = hostName.toLowerCase();
         }
+        // A down VM runs no pods, and draining its NotReady node would wait for pod deletions
+        // that the node can never confirm. Deleting the node object is enough.
+        final boolean drain = !isVmDown(userVm.getState());
         while (retryCounter < retries) {
             retryCounter++;
             try {
-                Pair<Boolean, String> result = SshHelper.sshExecute(ipAddress, port, getControlNodeLoginUser(),
-                        pkFile, null, String.format("sudo /opt/bin/kubectl drain %s --ignore-daemonsets --delete-emptydir-data", hostName),
-                        10000, 10000, 60000);
-                if (!result.first()) {
-                    logger.warn("Draining node: {} on VM: {} in Kubernetes cluster: {} unsuccessful", hostName, userVm, kubernetesCluster);
-                } else {
-                    result = SshHelper.sshExecute(ipAddress, port, getControlNodeLoginUser(),
-                            pkFile, null, String.format("sudo /opt/bin/kubectl delete node %s", hostName),
-                            10000, 10000, 30000);
-                    if (result.first()) {
-                        return true;
-                    } else {
-                        logger.warn("Deleting node: {} on VM: {} in Kubernetes cluster: {} unsuccessful", hostName, userVm, kubernetesCluster);
+                if (drain) {
+                    Pair<Boolean, String> result = SshHelper.sshExecute(ipAddress, port, getControlNodeLoginUser(),
+                            pkFile, null, String.format("sudo /opt/bin/kubectl drain %s --ignore-daemonsets --delete-emptydir-data", hostName),
+                            10000, 10000, 60000);
+                    if (!result.first()) {
+                        logger.warn("Draining node: {} on VM: {} in Kubernetes cluster: {} unsuccessful", hostName, userVm, kubernetesCluster);
+                        break;
                     }
                 }
+                Pair<Boolean, String> result = SshHelper.sshExecute(ipAddress, port, getControlNodeLoginUser(),
+                        pkFile, null, String.format("sudo /opt/bin/kubectl delete node %s", hostName),
+                        10000, 10000, 30000);
+                if (result.first()) {
+                    return true;
+                }
+                logger.warn("Deleting node: {} on VM: {} in Kubernetes cluster: {} unsuccessful", hostName, userVm, kubernetesCluster);
                 break;
             } catch (Exception e) {
                 String msg = String.format("Failed to remove Kubernetes cluster: %s node: %s on VM: %s", kubernetesCluster, hostName, userVm);
@@ -346,7 +353,7 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
             final DataCenter zone = dataCenterDao.findById(kubernetesCluster.getZoneId());
             VMTemplateVO clusterTemplate = templateDao.findById(kubernetesCluster.getTemplateId());
             try {
-                if (originalState.equals(KubernetesCluster.State.Running)) {
+                if (KubernetesCluster.State.Running.equals(originalState) || KubernetesCluster.State.Alert.equals(originalState)) {
                     plan(newVmRequiredCount, zone, clusterServiceOffering, kubernetesCluster.getDomainId(), kubernetesCluster.getAccountId(), clusterTemplate.getHypervisorType(), clusterTemplate.getArch(), nodeType);
                 } else {
                     plan(kubernetesCluster.getTotalNodeCount() + newVmRequiredCount, zone, clusterServiceOffering, kubernetesCluster.getDomainId(), kubernetesCluster.getAccountId(), clusterTemplate.getHypervisorType(), clusterTemplate.getArch(), nodeType);
@@ -457,10 +464,41 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
         removeNodesFromCluster(vmList);
     }
 
+    /**
+     * Whether the VM is known not to be running, so its node can't be Ready and runs no pods.
+     * Other states that aren't Running, such as Migrating or Unknown (a disconnected host), are
+     * not treated as down, as the VM may still be running.
+     */
+    public static boolean isVmDown(VirtualMachine.State state) {
+        return VirtualMachine.State.Stopped.equals(state) || VirtualMachine.State.Shutdown.equals(state) ||
+                VirtualMachine.State.Error.equals(state) || VirtualMachine.State.Destroyed.equals(state) ||
+                VirtualMachine.State.Expunging.equals(state);
+    }
+
+    private boolean isVmDown(long vmId) {
+        VMInstanceVO vm = vmInstanceDao.findById(vmId);
+        return vm != null && isVmDown(vm.getState());
+    }
+
+    /**
+     * The number of the cluster's Kubernetes nodes whose VMs are down, leaving out etcd nodes,
+     * which aren't Kubernetes nodes, and the given VMs.
+     */
+    protected long getDownNodeCount(Set<Long> excludedVmIds) {
+        return getKubernetesClusterVMMaps().stream()
+                .filter(vm -> !vm.isEtcdNode() && !excludedVmIds.contains(vm.getVmId()) && isVmDown(vm.getVmId()))
+                .count();
+    }
+
     public List<KubernetesClusterVmMapVO> getWorkerNodesToRemove() {
         List<KubernetesClusterVmMapVO> workerVMsMap = getKubernetesClusterVMMaps().stream()
                 .filter(vm -> !vm.isExternalNode() && !vm.isControlNode() && !vm.isEtcdNode())
                 .collect(Collectors.toList());
+        // Nodes are removed from the end of the list: put workers whose VMs are down last, so a
+        // scale-down removes those first. The sort is stable, so the order is otherwise kept.
+        Set<Long> downVmIds = workerVMsMap.stream().map(KubernetesClusterVmMapVO::getVmId)
+                .filter(this::isVmDown).collect(Collectors.toSet());
+        workerVMsMap.sort(Comparator.comparing(vm -> downVmIds.contains(vm.getVmId())));
         int totalWorkerNodes = workerVMsMap.size();
         int desiredWorkerNodes = clusterSize == null ? (int) kubernetesCluster.getNodeCount() : clusterSize.intValue();
         int toRemoveCount = Math.max(0, totalWorkerNodes - desiredWorkerNodes);
@@ -527,8 +565,11 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
         attachIsoKubernetesVMs(clusterVMs);
         KubernetesClusterVO kubernetesClusterVO = kubernetesClusterDao.findById(kubernetesCluster.getId());
         kubernetesClusterVO.setNodeCount(clusterSize);
+        // Existing nodes whose VMs are down (the usual reason a cluster is in Alert) can't become
+        // ready. The new nodes are always expected to become ready, even if a new VM goes down.
+        final Set<Long> newVmIds = clusterVMs.stream().map(InternalIdentity::getId).collect(Collectors.toSet());
         boolean readyNodesCountValid = KubernetesClusterUtil.validateKubernetesClusterReadyNodesCount(kubernetesClusterVO, publicIpAddress, sshPort,
-                getControlNodeLoginUser(), sshKeyFile, scaleTimeoutTime, 15000);
+                getControlNodeLoginUser(), sshKeyFile, () -> kubernetesClusterVO.getTotalNodeCount() - getDownNodeCount(newVmIds), scaleTimeoutTime, 15000);
         detachIsoKubernetesVMs(clusterVMs);
         deleteTemplateLaunchPermission();
         if (!readyNodesCountValid) { // Scaling failed
@@ -587,6 +628,14 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
         }
         scaleTimeoutTime = System.currentTimeMillis() + KubernetesClusterService.KubernetesClusterScaleTimeout.value() * 1000;
         final long originalClusterSize = kubernetesCluster.getNodeCount();
+
+        // The request was validated for the state it was accepted in, for example what Alert allows,
+        // and another operation may have started since
+        KubernetesClusterVO currentCluster = kubernetesClusterDao.findById(kubernetesCluster.getId());
+        if (currentCluster != null && !currentCluster.getState().equals(originalState)) {
+            logAndThrow(Level.WARN, String.format("Scaling Kubernetes cluster : %s failed, it went from %s to %s state after the request was accepted, please retry",
+                    kubernetesCluster.getName(), originalState, currentCluster.getState()));
+        }
 
         // DEFAULT node type means only the global service offering has been set for the Kubernetes cluster
         boolean scaleClusterDefaultOffering = serviceOfferingNodeTypeMap.containsKey(DEFAULT.name());
