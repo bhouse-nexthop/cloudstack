@@ -108,8 +108,9 @@ jobs:
       - name: Install non-redistributable dependencies
         env:
           # pinned rather than tracking the default branch: these jars end up
-          # inside packages we deploy
-          NONOSS_SHA: f94b5cf
+          # inside packages we deploy. dc3f877 is the first to carry
+          # netris-java-sdk 1.1.0, which main's Netris plugin needs.
+          NONOSS_SHA: dc3f877
         run: |
           git clone --filter=blob:none --no-checkout \
             https://github.com/shapeblue/cloudstack-nonoss.git /tmp/nonoss
@@ -129,17 +130,24 @@ jobs:
           # branding as well: every build produced cloudstack-management_4.22.1.1~noble,
           # indistinguishable from a stock Apache package and from every other build of
           # this branch. Count the commits since the base tag and pass that as the brand.
+          #
+          # A branch on main has a SNAPSHOT version that is never tagged, so count from the
+          # nearest tag instead. build-deb.sh drops everything after the first dash when it
+          # applies the brand, so 24.0.0-SNAPSHOT is built as 24.0.0-<brand>.
           base=$(head -n1 debian/changelog | awk -F '[()]' '{print $2}')
           if git rev-parse --verify -q "refs/tags/${base}" >/dev/null; then
             rev=$(git rev-list --count "refs/tags/${base}..HEAD")
+          elif nearest=$(git describe --tags --abbrev=0 HEAD 2>/dev/null); then
+            echo "No ${base} tag in this checkout, numbering from ${nearest}"
+            rev=$(git rev-list --count "refs/tags/${nearest}..HEAD")
           else
-            echo "No ${base} tag in this checkout, numbering from the start of history"
+            echo "No tag in this checkout, numbering from the start of history"
             rev=$(git rev-list --count HEAD)
           fi
           # dots, not dashes: the last dash in a Debian version starts the revision field
           brand="${{ inputs.brand || 'nexthop' }}.${rev}.g$(git rev-parse --short HEAD)"
-          echo "Building ${base}-${brand}"
-          echo "Building \`${base}-${brand}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Building ${base%%-*}-${brand}"
+          echo "Building \`${base%%-*}-${brand}\`" >> "$GITHUB_STEP_SUMMARY"
           cd packaging
           ./build-deb.sh \
             --brand "$brand" \
