@@ -701,22 +701,12 @@ public class KubernetesClusterStartWorker extends KubernetesClusterResourceModif
 
     private boolean isKubernetesClusterKubeConfigAvailable(final long timeoutTime) {
         if (StringUtils.isEmpty(publicIpAddress)) {
-            KubernetesClusterDetailsVO kubeConfigDetail = kubernetesClusterDetailsDao.findDetail(kubernetesCluster.getId(), "kubeConfigData");
+            KubernetesClusterDetailsVO kubeConfigDetail = kubernetesClusterDetailsDao.findDetail(kubernetesCluster.getId(), KUBE_CONFIG_DATA_DETAIL);
             if (kubeConfigDetail != null && StringUtils.isNotEmpty(kubeConfigDetail.getValue())) {
                 return true;
             }
         }
-        String kubeConfig = KubernetesClusterUtil.getKubernetesClusterConfig(kubernetesCluster, publicIpAddress, sshPort, getControlNodeLoginUser(), sshKeyFile, timeoutTime);
-        if (StringUtils.isNotEmpty(kubeConfig)) {
-            final String controlVMPrivateIpAddress = getControlVmPrivateIp();
-            if (StringUtils.isNotEmpty(controlVMPrivateIpAddress)) {
-                kubeConfig = kubeConfig.replace(String.format("server: https://%s:%d", controlVMPrivateIpAddress, CLUSTER_API_PORT),
-                        String.format("server: https://%s:%d", publicIpAddress, CLUSTER_API_PORT));
-            }
-            kubernetesClusterDetailsDao.addDetail(kubernetesCluster.getId(), "kubeConfigData", Base64.encodeBase64String(kubeConfig.getBytes(com.cloud.utils.StringUtils.getPreferredCharset())), false);
-            return true;
-        }
-        return false;
+        return refreshKubeConfigData(timeoutTime);
     }
 
     private boolean isKubernetesClusterDashboardServiceRunning(final boolean onCreate, final Long timeoutTime) {
