@@ -84,7 +84,7 @@ public class KubernetesClusterUtil {
         return (int) vmMaps.stream().filter(vmMap -> !vmMap.isExternalNode() && getNodeType(vmMap) == type).count();
     }
 
-    public static final String CLUSTER_NODE_READY_COMMAND = "sudo /opt/bin/kubectl get nodes | awk '{if ($1 == \"%s\" && $2 == \"Ready\") print $1}'";
+    public static final String CLUSTER_NODE_READY_COMMAND = "sudo /opt/bin/kubectl get nodes | awk '{if ($1 == \"%s\" && ($2 == \"Ready\" || $2 ~ /^Ready,/)) print $1}'";
     public static final String CLUSTER_NODE_VERSION_COMMAND = "sudo /opt/bin/kubectl get nodes | awk '{if ($1 == \"%s\") print $5}'";
 
     public static boolean isKubernetesClusterNodeReady(final KubernetesCluster kubernetesCluster, String ipAddress, int port,
@@ -234,6 +234,8 @@ public class KubernetesClusterUtil {
         return running;
     }
 
+    private static final long KUBE_CONFIG_RETRY_INTERVAL_MS = 5000;
+
     public static String getKubernetesClusterConfig(final KubernetesCluster kubernetesCluster, final String ipAddress, final int port,
                                                     final String user, final File sshKeyFile, final long timeoutTime) {
         String kubeConfig = "";
@@ -253,6 +255,13 @@ public class KubernetesClusterUtil {
                 }
             } catch (Exception e) {
                 LOGGER.warn(String.format("Failed to retrieve kube-config file for Kubernetes cluster %s", kubernetesCluster), e);
+            }
+            // a refused connection fails at once; don't spin on it until the timeout
+            try {
+                Thread.sleep(Math.max(0, Math.min(KUBE_CONFIG_RETRY_INTERVAL_MS, timeoutTime - System.currentTimeMillis())));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
             }
         }
         return kubeConfig;

@@ -48,6 +48,7 @@ public interface KubernetesCluster extends ControlledEntity, com.cloud.utils.fsm
         RemoveNodeRequested,
         UpgradeRequested,
         UpdateRequested,
+        CertificateRotationRequested,
         OperationSucceeded,
         OperationFailed,
         CreateFailed,
@@ -64,6 +65,7 @@ public interface KubernetesCluster extends ControlledEntity, com.cloud.utils.fsm
         ScalingStoppedCluster("Transient state in which the service offerings of stopped clusters are getting scaled"),
         Upgrading("Transient state in which cluster is getting upgraded"),
         Updating("Transient state in which the nodes of the cluster are restarted with their stored settings, a few at a time"),
+        RotatingCertificates("Transient state in which the control plane certificates of the cluster are getting renewed"),
         Importing("Transient state in which additional nodes are added as worker nodes to a cluster"),
         RemovingNodes("Transient state in which additional nodes are removed from a cluster"),
         Alert("State to represent Kubernetes clusters which are not in expected desired state (operationally in active control place, stopped cluster VM's etc)."),
@@ -117,6 +119,12 @@ public interface KubernetesCluster extends ControlledEntity, com.cloud.utils.fsm
             s_fsm.addTransition(State.Alert, Event.UpdateRequested, State.Updating);
             s_fsm.addTransition(State.Updating, Event.OperationSucceeded, State.Running);
             s_fsm.addTransition(State.Updating, Event.OperationFailed, State.Alert);
+
+            s_fsm.addTransition(State.Running, Event.CertificateRotationRequested, State.RotatingCertificates);
+            // lets a failed or interrupted rotation be retried, and rescues a cluster whose certificates already expired
+            s_fsm.addTransition(State.Alert, Event.CertificateRotationRequested, State.RotatingCertificates);
+            s_fsm.addTransition(State.RotatingCertificates, Event.OperationSucceeded, State.Running);
+            s_fsm.addTransition(State.RotatingCertificates, Event.OperationFailed, State.Alert);
 
             s_fsm.addTransition(State.Running, Event.AddNodeRequested, State.Importing);
             s_fsm.addTransition(State.Alert, Event.AddNodeRequested, State.Importing);
