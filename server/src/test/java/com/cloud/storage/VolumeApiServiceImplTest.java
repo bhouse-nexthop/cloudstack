@@ -2290,6 +2290,78 @@ public class VolumeApiServiceImplTest {
         volumeApiServiceImpl.validateNoVmSnapshots(volumeVoMock);
     }
 
+    private VMInstanceVO mockVmInstance(VirtualMachine.Type type, State state) {
+        VMInstanceVO vm = Mockito.mock(VMInstanceVO.class);
+        Mockito.when(vm.getType()).thenReturn(type);
+        Mockito.lenient().when(vm.getState()).thenReturn(state);
+        Mockito.when(volumeVoMock.getInstanceId()).thenReturn(vmInstanceMockId);
+        Mockito.when(_vmInstanceDao.findById(vmInstanceMockId)).thenReturn(vm);
+        return vm;
+    }
+
+    @Test
+    public void validateVolumeIsNotOnRunningSystemVmTestDetachedVolume() {
+        Mockito.when(volumeVoMock.getInstanceId()).thenReturn(null);
+
+        volumeApiServiceImpl.validateVolumeIsNotOnRunningSystemVm(volumeVoMock);
+
+        Mockito.verify(_vmInstanceDao, Mockito.never()).findById(Mockito.anyLong());
+    }
+
+    @Test
+    public void validateVolumeIsNotOnRunningSystemVmTestRunningUserVm() {
+        mockVmInstance(VirtualMachine.Type.User, State.Running);
+
+        volumeApiServiceImpl.validateVolumeIsNotOnRunningSystemVm(volumeVoMock);
+    }
+
+    @Test
+    public void validateVolumeIsNotOnRunningSystemVmTestStoppedRouter() {
+        mockVmInstance(VirtualMachine.Type.DomainRouter, State.Stopped);
+
+        volumeApiServiceImpl.validateVolumeIsNotOnRunningSystemVm(volumeVoMock);
+    }
+
+    @Test
+    public void validateVolumeIsNotOnRunningSystemVmTestNotStoppedSystemVms() {
+        for (VirtualMachine.Type type : List.of(VirtualMachine.Type.DomainRouter, VirtualMachine.Type.ConsoleProxy,
+                VirtualMachine.Type.SecondaryStorageVm, VirtualMachine.Type.InternalLoadBalancerVm)) {
+            for (State state : List.of(State.Running, State.Starting, State.Stopping, State.Migrating)) {
+                mockVmInstance(type, state);
+                try {
+                    volumeApiServiceImpl.validateVolumeIsNotOnRunningSystemVm(volumeVoMock);
+                    Assert.fail("Resizing the volume of a " + type + " in state " + state + " must be refused");
+                } catch (InvalidParameterValueException e) {
+                    Assert.assertTrue(e.getMessage(), e.getMessage().contains("Stop the system VM"));
+                }
+            }
+        }
+    }
+
+    @Test
+    public void resizeVolumeSizeOnlyOnRunningRouterIsRefused() throws ResourceAllocationException {
+        ResizeVolumeCmd cmd = new ResizeVolumeCmd();
+        ReflectionTestUtils.setField(cmd, "id", volumeMockId);
+        ReflectionTestUtils.setField(cmd, "size", 1000L); // GiB, a grow of the 425 GiB volumeVoMock
+
+        Mockito.when(volumeDaoMock.findById(volumeMockId)).thenReturn(volumeVoMock);
+        Mockito.when(volumeDaoMock.getHypervisorType(volumeMockId)).thenReturn(HypervisorType.KVM);
+        Mockito.when(volumeVoMock.getState()).thenReturn(Volume.State.Ready);
+        Mockito.when(volumeVoMock.getDiskOfferingId()).thenReturn(diskOfferingMockId);
+        Mockito.when(_diskOfferingDao.findById(diskOfferingMockId)).thenReturn(diskOfferingMock);
+        Mockito.doReturn(false).when(volumeApiServiceImpl).isNotPossibleToResize(volumeVoMock, diskOfferingMock);
+        Mockito.when(volumeDataFactoryMock.getVolume(volumeMockId)).thenReturn(volumeInfoMock);
+        mockVmInstance(VirtualMachine.Type.DomainRouter, State.Running);
+
+        try {
+            volumeApiServiceImpl.resizeVolume(cmd);
+            Assert.fail("A size-only resize of a running router's volume must be refused");
+        } catch (InvalidParameterValueException e) {
+            Assert.assertTrue(e.getMessage(), e.getMessage().contains("Stop the system VM"));
+        }
+        Mockito.verify(volumeServiceMock, Mockito.never()).resize(any(VolumeInfo.class));
+    }
+
     @Test
     public void vmHasVmSnapshotsExceptKvmDiskOnlySnapshotsTestMultipleDiskAndMemory () {
         List<VMSnapshotVO> snapList = generateVmSnapshotVoList(VMSnapshot.Type.DiskAndMemory, VMSnapshot.Type.DiskAndMemory);
