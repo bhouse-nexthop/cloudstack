@@ -605,6 +605,41 @@ public class FirewallManagerTest {
         verify(_accountMgr, times(1)).checkAccess(caller, null, true, ipAddress);
     }
 
+    private void validateVpcRuleProtocol(String protocol) {
+        Account caller = Mockito.mock(Account.class);
+        IPAddressVO ipAddress = Mockito.mock(IPAddressVO.class);
+        Vpc vpc = Mockito.mock(Vpc.class);
+        FirewallServiceProvider fwProvider = Mockito.mock(FirewallServiceProvider.class);
+        Map<Capability, String> firewallCaps = new HashMap<>();
+        firewallCaps.put(Capability.SupportedProtocols, "tcp,udp,icmp");
+        firewallCaps.put(Capability.SupportedTrafficDirection, "ingress,egress");
+        Map<Service, Map<Capability, String>> caps = new HashMap<>();
+        caps.put(Service.Firewall, firewallCaps);
+
+        when(_vpcMgr.getActiveVpc(10L)).thenReturn(vpc);
+        when(fwProvider.getProvider()).thenReturn(Network.Provider.VPCVirtualRouter);
+        when(fwProvider.getCapabilities()).thenReturn(caps);
+        when(_vpcMgr.isProviderSupportServiceInVpc(10L, Service.Firewall, Network.Provider.VPCVirtualRouter)).thenReturn(true);
+        _firewallMgr._firewallElements = List.of(fwProvider);
+
+        _firewallMgr.validateFirewallRuleForVpc(caller, ipAddress, null, null, protocol, Purpose.Firewall, FirewallRuleType.User, 10L, FirewallRule.TrafficType.Ingress);
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
+    public void testValidateFirewallRuleForVpcRejectsPartOfAProtocolName() {
+        validateVpcRuleProtocol("cp");
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
+    public void testValidateFirewallRuleForVpcRejectsAProtocolList() {
+        validateVpcRuleProtocol("tcp,udp");
+    }
+
+    @Test
+    public void testValidateFirewallRuleForVpcAcceptsAnUpperCaseName() {
+        validateVpcRuleProtocol("TCP");
+    }
+
     @Test
     public void testCreateFirewallRuleRoutesToVpcWhenVpcIdProvided() throws NetworkRuleConflictException {
         Account caller = Mockito.mock(Account.class);
