@@ -2478,7 +2478,8 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         advanceStop(vmUuid, force, force);
     }
 
-    protected void advanceStop(final String vmUuid, final boolean cleanUpEvenIfUnableToStop, final boolean releaseOnlyIfHostIsGone)
+    @Override
+    public void advanceStop(final String vmUuid, final boolean cleanUpEvenIfUnableToStop, final boolean releaseOnlyIfHostIsGone)
             throws AgentUnavailableException, OperationTimedoutException, ConcurrentOperationException {
 
         final AsyncJobExecutionContext jobContext = AsyncJobExecutionContext.getCurrentExecutionContext();
@@ -2707,7 +2708,8 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
                         if (!changeState(vm, Event.AgentReportStopped, null, work, Step.Done)) {
                             throw new CloudRuntimeException("Unable to stop " + vm);
                         }
-
+                        // cleanup() has stopped the instance and released its resources
+                        return;
                     } catch (final NoTransitionException e) {
                         logger.warn("Unable to cleanup {}", vm);
                         throw new CloudRuntimeException("Unable to stop " + vm, e);
