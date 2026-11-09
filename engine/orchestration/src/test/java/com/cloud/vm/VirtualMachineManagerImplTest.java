@@ -110,8 +110,6 @@ import com.cloud.agent.api.to.VirtualMachineTO;
 import com.cloud.api.query.dao.UserVmJoinDao;
 import com.cloud.api.query.vo.UserVmJoinVO;
 import com.cloud.dc.ClusterDetailsDao;
-import com.cloud.service.dao.ServiceOfferingDetailsDao;
-import com.cloud.dc.ClusterDetailsVO;
 import com.cloud.dc.ClusterVO;
 import com.cloud.dc.DataCenter;
 import com.cloud.dc.DataCenterVO;
@@ -277,7 +275,7 @@ public class VirtualMachineManagerImplTest {
     @Mock
     private ClusterDetailsDao _clusterDetailsDao;
     @Mock
-    private ServiceOfferingDetailsDao _serviceOfferingDetailsDao;
+    private VirtualMachineManagerOverCommit vmOverCommit;
     @Mock
     private VMInstanceDetailsDao vmInstanceDetailsDao;
     @Mock
@@ -1183,14 +1181,7 @@ public class VirtualMachineManagerImplTest {
 
         Cluster cluster = mock(Cluster.class);
         when(dest.getCluster()).thenReturn(cluster);
-        ClusterDetailsVO cluster_detail_cpu = mock(ClusterDetailsVO.class);
-        ClusterDetailsVO cluster_detail_ram = mock(ClusterDetailsVO.class);
         when(cluster.getId()).thenReturn(1L);
-        when(_clusterDetailsDao.findDetail(1L, VmDetailConstants.CPU_OVER_COMMIT_RATIO)).thenReturn(cluster_detail_cpu);
-        when(_clusterDetailsDao.findDetail(1L, VmDetailConstants.MEMORY_OVER_COMMIT_RATIO)).thenReturn(cluster_detail_ram);
-        when(vmInstanceDetailsDao.findDetail(anyLong(), Mockito.anyString())).thenReturn(null);
-        when(cluster_detail_cpu.getValue()).thenReturn("1.0");
-        when(cluster_detail_ram.getValue()).thenReturn("1.0");
         doReturn(false).when(virtualMachineManagerImpl).areAllVolumesAllocated(Mockito.anyLong());
 
         CallContext callContext = mock(CallContext.class);
@@ -1279,14 +1270,7 @@ public class VirtualMachineManagerImplTest {
 
         Cluster cluster = mock(Cluster.class);
         when(dest.getCluster()).thenReturn(cluster);
-        ClusterDetailsVO cluster_detail_cpu = mock(ClusterDetailsVO.class);
-        ClusterDetailsVO cluster_detail_ram = mock(ClusterDetailsVO.class);
         when(cluster.getId()).thenReturn(1L);
-        when(_clusterDetailsDao.findDetail(1L, VmDetailConstants.CPU_OVER_COMMIT_RATIO)).thenReturn(cluster_detail_cpu);
-        when(_clusterDetailsDao.findDetail(1L, VmDetailConstants.MEMORY_OVER_COMMIT_RATIO)).thenReturn(cluster_detail_ram);
-        when(vmInstanceDetailsDao.findDetail(anyLong(), Mockito.anyString())).thenReturn(null);
-        when(cluster_detail_cpu.getValue()).thenReturn("1.0");
-        when(cluster_detail_ram.getValue()).thenReturn("1.0");
         doReturn(true).when(virtualMachineManagerImpl).areAllVolumesAllocated(Mockito.anyLong());
 
         CallContext callContext = mock(CallContext.class);
@@ -1735,14 +1719,6 @@ public class VirtualMachineManagerImplTest {
 
         when(hostMock.getClusterId()).thenReturn(clusterMockId);
 
-        // Mock cpuOvercommitRatio and ramOvercommitRatio
-        ClusterDetailsVO cpuOvercommitRatio = Mockito.mock(ClusterDetailsVO.class);
-        when(cpuOvercommitRatio.getValue()).thenReturn("1.0");
-        when(_clusterDetailsDao.findDetail(clusterMockId, VmDetailConstants.CPU_OVER_COMMIT_RATIO)).thenReturn(cpuOvercommitRatio);
-        ClusterDetailsVO ramOvercommitRatio = Mockito.mock(ClusterDetailsVO.class);
-        when(ramOvercommitRatio.getValue()).thenReturn("1.0");
-        when(_clusterDetailsDao.findDetail(clusterMockId, VmDetailConstants.MEMORY_OVER_COMMIT_RATIO)).thenReturn(ramOvercommitRatio);
-
         // Mock NICs
         List<NicVO> nics = new ArrayList<>();
         NicVO nic1 = Mockito.mock(NicVO.class);
@@ -1789,7 +1765,7 @@ public class VirtualMachineManagerImplTest {
         // Assert
         assertNotNull(result);
         assertEquals(vmTO, result);
-        verify(_clusterDetailsDao, times(2)).findDetail(eq(clusterMockId), anyString());
+        verify(vmOverCommit).updateOverCommitRatioForVmProfile(any(VirtualMachineProfile.class), eq(clusterMockId));
         verify(vmInstanceDetailsDao).listDetailsKeyPairs(anyLong(), anyList());
     }
 
