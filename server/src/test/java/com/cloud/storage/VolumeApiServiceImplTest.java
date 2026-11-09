@@ -72,6 +72,7 @@ import org.apache.cloudstack.snapshot.SnapshotHelper;
 import org.apache.cloudstack.storage.datastore.db.ImageStoreDao;
 import org.apache.cloudstack.storage.datastore.db.ImageStoreVO;
 import org.apache.cloudstack.storage.datastore.db.PrimaryDataStoreDao;
+import org.apache.cloudstack.storage.datastore.db.SnapshotDataStoreDao;
 import org.apache.cloudstack.storage.datastore.db.StoragePoolVO;
 import org.apache.cloudstack.storage.datastore.db.VolumeDataStoreDao;
 import org.apache.cloudstack.storage.datastore.db.VolumeDataStoreVO;
@@ -265,6 +266,9 @@ public class VolumeApiServiceImplTest {
 
     @Mock
     private SnapshotDao snapshotDaoMock;
+
+    @Mock
+    private SnapshotDataStoreDao snapshotDataStoreDaoMock;
 
     @Mock
     private SnapshotPolicyDetailsDao snapshotPolicyDetailsDao;
@@ -735,6 +739,26 @@ public class VolumeApiServiceImplTest {
     @Test
     public void testNonEmptyGetVolumeNameFromCmd() {
         Assert.assertSame(volumeApiServiceImpl.getVolumeNameFromCommand("abc"), "abc");
+    }
+
+    @Test
+    public void allocVolumeFromSnapshotWhoseVolumeRowIsGoneIsRefused() throws ResourceAllocationException {
+        long snapshotId = 42L;
+        SnapshotVO snapshot = Mockito.mock(SnapshotVO.class);
+        Mockito.when(snapshot.getState()).thenReturn(Snapshot.State.BackedUp);
+        Mockito.when(snapshot.getVolumeId()).thenReturn(volumeMockId);
+        Mockito.when(snapshotDaoMock.findById(snapshotId)).thenReturn(snapshot);
+        Mockito.when(volumeDaoMock.findByIdIncludingRemoved(volumeMockId)).thenReturn(null);
+        Mockito.when(createVol.getDisplayVolume()).thenReturn(null);
+        Mockito.when(createVol.getDiskOfferingId()).thenReturn(null);
+        Mockito.when(createVol.getSnapshotId()).thenReturn(snapshotId);
+
+        try {
+            volumeApiServiceImpl.allocVolume(createVol);
+            Assert.fail("Creating a volume from a snapshot whose volume row is gone must be refused");
+        } catch (InvalidParameterValueException e) {
+            Assert.assertTrue(e.getMessage(), e.getMessage().contains("no longer exists"));
+        }
     }
 
     @Test

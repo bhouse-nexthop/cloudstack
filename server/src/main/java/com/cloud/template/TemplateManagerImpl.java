@@ -2292,9 +2292,12 @@ public class TemplateManagerImpl extends ManagerBase implements TemplateManager,
             }
             // Volume could be removed so find including removed to record source template id.
             volume = _volumeDao.findByIdIncludingRemoved(snapshot.getVolumeId());
+            if (volume == null) {
+                throw new InvalidParameterValueException(String.format("Cannot create a Template from Snapshot %s, because the volume it was taken from no longer exists", snapshot.getUuid()));
+            }
 
             // Don't support creating templates from encrypted volumes (yet)
-            if (volume != null && (volume.getPassphraseId() != null || volume.getKmsKeyId() != null)) {
+            if (volume.getPassphraseId() != null || volume.getKmsKeyId() != null) {
                 throw new UnsupportedOperationException("Cannot create Templates from Snapshots of encrypted volumes");
             }
 

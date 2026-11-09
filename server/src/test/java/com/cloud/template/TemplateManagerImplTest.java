@@ -66,6 +66,7 @@ import org.springframework.core.type.filter.TypeFilter;
 
 import com.cloud.agent.AgentManager;
 import com.cloud.agent.api.to.DiskTO;
+import com.cloud.api.ApiDBUtils;
 import com.cloud.api.query.dao.SnapshotJoinDao;
 import com.cloud.api.query.dao.UserVmJoinDao;
 import com.cloud.api.query.vo.UserVmJoinVO;
@@ -545,6 +546,12 @@ public class TemplateManagerImplTest extends TestCase {
         when(mockSnapshot.getVolumeId()).thenReturn(1L);
         when(mockSnapshot.getState()).thenReturn(Snapshot.State.BackedUp);
         when(mockSnapshot.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.XenServer);
+        VolumeVO mockVolume = mock(VolumeVO.class);
+        when(mockVolume.getPassphraseId()).thenReturn(null);
+        when(mockVolume.getKmsKeyId()).thenReturn(null);
+        when(mockVolume.getTemplateId()).thenReturn(null);
+        when(mockVolume.getInstanceId()).thenReturn(null);
+        when(volumeDao.findByIdIncludingRemoved(1L)).thenReturn(mockVolume);
 
         GuestOSVO mockGuestOS = mock(GuestOSVO.class);
         when(guestOSDao.findById(anyLong())).thenReturn(mockGuestOS);
@@ -564,10 +571,32 @@ public class TemplateManagerImplTest extends TestCase {
             }
         });
 
-        try (MockedConstruction<CheckedReservation> mockCheckedReservation = Mockito.mockConstruction(CheckedReservation.class)) {
+        try (MockedConstruction<CheckedReservation> mockCheckedReservation = Mockito.mockConstruction(CheckedReservation.class);
+             MockedStatic<ApiDBUtils> apiDBUtilsMock = Mockito.mockStatic(ApiDBUtils.class)) {
             VMTemplateVO template = templateManager.createPrivateTemplateRecord(mockCreateCmd, mockTemplateOwner);
             assertTrue("Template in a region store should have cross zones set", template.isCrossZones());
         }
+    }
+
+    @Test
+    public void testCreatePrivateTemplateRecordSnapshotVolumeRowGone() throws ResourceAllocationException {
+        CreateTemplateCmd mockCreateCmd = mock(CreateTemplateCmd.class);
+        when(mockCreateCmd.getTemplateName()).thenReturn("test");
+        when(mockCreateCmd.getVolumeId()).thenReturn(null);
+        when(mockCreateCmd.getSnapshotId()).thenReturn(1L);
+
+        SnapshotVO mockSnapshot = mock(SnapshotVO.class);
+        when(snapshotDao.findById(1L)).thenReturn(mockSnapshot);
+        when(mockSnapshot.getVolumeId()).thenReturn(2L);
+        when(volumeDao.findByIdIncludingRemoved(2L)).thenReturn(null);
+
+        try {
+            templateManager.createPrivateTemplateRecord(mockCreateCmd, mock(Account.class));
+            fail("Creating a Template from a Snapshot whose volume row is gone must be refused");
+        } catch (InvalidParameterValueException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("no longer exists"));
+        }
+        Mockito.verify(vmTemplateDao, Mockito.never()).persist(any(VMTemplateVO.class));
     }
 
     @Test
