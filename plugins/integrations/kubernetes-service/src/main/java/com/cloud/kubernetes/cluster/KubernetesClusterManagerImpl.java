@@ -317,6 +317,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
     private static final String DEFAULT_NSX_VPC_NETWORK_OFFERING_FOR_KUBERNETES_SERVICE_DISPLAY_TEXT = "Network Offering for NSX CloudStack Kubernetes service on VPC";
 
     protected StateMachine2<KubernetesCluster.State, KubernetesCluster.Event, KubernetesCluster> _stateMachine = KubernetesCluster.State.getStateMachine();
+    private KubernetesClusterVmMapChecker vmMapChecker;
 
     protected final static List<String> CLUSTER_NODES_TYPES_LIST = Arrays.asList(WORKER.name(), CONTROL.name(), ETCD.name());
 
@@ -2753,6 +2754,20 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         }
     }
 
+    /**
+     * Reports the clusters whose VM map does not match their VMs or their Kubernetes nodes. Changes nothing.
+     */
+    protected void checkKubernetesClusterVmMaps() {
+        try {
+            if (vmMapChecker == null) {
+                vmMapChecker = ComponentContext.inject(new KubernetesClusterVmMapChecker(this));
+            }
+            vmMapChecker.checkClustersIfDue();
+        } catch (Exception e) {
+            logger.warn("Caught exception while checking the VM maps of Kubernetes clusters", e);
+        }
+    }
+
     /* Kubernetes cluster scanner checks if the Kubernetes cluster is in desired state. If it detects Kubernetes cluster
        is not in desired state, it will trigger an event and marks the Kubernetes cluster to be 'Alert' state. For e.g a
        Kubernetes cluster in 'Running' state should mean all the cluster of node VM's in the custer should be running and
@@ -2862,6 +2877,8 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             } catch (Exception e) {
                 logger.warn("Caught exception while running Kubernetes cluster state scanner", e);
             }
+            // starts the check on its own thread, as it needs SSH to each cluster
+            checkKubernetesClusterVmMaps();
             firstRun = false;
         }
     }
@@ -3376,6 +3393,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
     public ConfigKey<?>[] getConfigKeys() {
         return new ConfigKey<?>[] {
             KubernetesServiceEnabled,
+            KubernetesClusterVmMapChecker.KubernetesClusterVmMapCheckEnabled,
             KubernetesClusterNetworkOffering,
             KubernetesClusterStartTimeout,
             KubernetesClusterScaleTimeout,
