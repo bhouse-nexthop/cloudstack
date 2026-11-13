@@ -115,6 +115,7 @@ import com.cloud.agent.api.AttachIsoCommand;
 import com.cloud.agent.api.BackupSnapshotCommand;
 import com.cloud.agent.api.CheckHealthCommand;
 import com.cloud.agent.api.CheckNetworkCommand;
+import com.cloud.agent.api.CheckOnHostAnswer;
 import com.cloud.agent.api.CheckOnHostCommand;
 import com.cloud.agent.api.CheckRouterAnswer;
 import com.cloud.agent.api.CheckRouterCommand;
@@ -3133,7 +3134,10 @@ public class LibvirtComputingResourceTest {
         assertNotNull(wrapper);
 
         final Answer answer = wrapper.execute(command, libvirtComputingResourceMock);
-        assertFalse(answer.getResult());
+        assertTrue(answer.getResult());
+        assertTrue(answer instanceof CheckOnHostAnswer);
+        // the host monitors no storage pool, so it can not tell: it must not say that the host is dead
+        assertTrue(((CheckOnHostAnswer)answer).isAlive());
 
         verify(libvirtComputingResourceMock, times(1)).getMonitor();
     }
