@@ -3987,6 +3987,12 @@ public class ResourceManagerImpl extends ManagerBase implements ResourceManager,
         return new Ternary<>(username, password, privateKey);
     }
 
+    /** A host added with a non-root user needs sudo to restart the agent. */
+    protected String getAgentRestartCommand(String username) {
+        final String command = "service cloudstack-agent restart";
+        return "root".equals(username) ? command : "sudo " + command;
+    }
+
     /**
      * True if agent is restarted via SSH. Assumes kvm.ssh.to.agent = true and host status is not Up
      */
@@ -3998,7 +4004,7 @@ public class ResourceManagerImpl extends ManagerBase implements ResourceManager,
         }
         try {
             SSHCmdHelper.SSHCmdResult result = SSHCmdHelper.sshExecuteCmdOneShot(
-                    connection, "service cloudstack-agent restart");
+                    connection, getAgentRestartCommand(username));
             if (result.getReturnCode() != 0) {
                 throw new CloudRuntimeException(String.format("Could not restart agent on %s due to: %s", host, result.getStdErr()));
             }
