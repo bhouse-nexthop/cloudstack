@@ -3527,7 +3527,9 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
         }
 
         try {
-            snapshotHelper.checkKvmVolumeSnapshotsOnlyInPrimaryStorage(vol, _volsDao.getHypervisorType(vol.getId()));
+            if (liveMigrateVolume || !isOfflineRbdMoveWithinCephCluster(hypervisorType, srcStoragePoolVO, _storagePoolDao.findById(destPool.getId()))) {
+                snapshotHelper.checkKvmVolumeSnapshotsOnlyInPrimaryStorage(vol, hypervisorType);
+            }
         } catch (CloudRuntimeException ex) {
             throw new CloudRuntimeException(String.format("Unable to migrate %s to the destination storage pool [%s] due to [%s]", vol,
                     ReflectionToStringBuilderUtils.reflectOnlySelectedFields(destPool, "uuid", "name"), ex.getMessage()), ex);
@@ -3682,6 +3684,22 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
     private boolean isSourceOrDestNotOnStorPool(StoragePoolVO storagePoolVO, StoragePoolVO destinationStoragePoolVo) {
         return storagePoolVO.getPoolType() != Storage.StoragePoolType.StorPool
                 || destinationStoragePoolVo.getPoolType() != Storage.StoragePoolType.StorPool;
+    }
+
+    /**
+     * A stopped KVM volume moved between two unmanaged RBD pools of the same Ceph cluster is moved
+     * by the agent with rbd migration, which keeps its snapshots on primary storage. Snapshots that
+     * exist only on primary storage then do not block the move; if the agent cannot move it that
+     * way, the copy fails instead of dropping them.
+     */
+    protected boolean isOfflineRbdMoveWithinCephCluster(HypervisorType hypervisorType, StoragePoolVO srcPool, StoragePoolVO destPool) {
+        return HypervisorType.KVM == hypervisorType && srcPool != null && destPool != null
+                && srcPool.getPoolType() == Storage.StoragePoolType.RBD && destPool.getPoolType() == Storage.StoragePoolType.RBD
+                && !srcPool.isManaged() && !destPool.isManaged()
+                && Objects.equals(srcPool.getHostAddress(), destPool.getHostAddress())
+                && srcPool.getPort() == destPool.getPort()
+                && srcPool.getUserInfo() != null && Objects.equals(srcPool.getUserInfo(), destPool.getUserInfo())
+                && !Objects.equals(srcPool.getPath(), destPool.getPath());
     }
 
     private boolean isSourceAndDestOnStorPool(StoragePoolVO storagePoolVO, StoragePoolVO destinationStoragePoolVo) {
