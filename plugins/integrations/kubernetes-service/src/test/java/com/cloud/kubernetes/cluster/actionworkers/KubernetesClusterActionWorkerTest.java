@@ -17,6 +17,8 @@
 package com.cloud.kubernetes.cluster.actionworkers;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -26,7 +28,9 @@ import java.util.UUID;
 import org.apache.cloudstack.affinity.AffinityGroupVO;
 import org.apache.cloudstack.affinity.dao.AffinityGroupDao;
 import org.apache.cloudstack.api.ApiConstants;
+import org.apache.cloudstack.framework.config.dao.ConfigurationDao;
 import org.apache.cloudstack.userdata.UserDataManager;
+import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Level;
 import org.junit.Assert;
@@ -48,6 +52,7 @@ import com.cloud.kubernetes.cluster.KubernetesClusterVO;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterDao;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterDetailsDao;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterVmMapDao;
+import com.cloud.kubernetes.version.KubernetesSupportedVersionVO;
 import com.cloud.kubernetes.version.dao.KubernetesSupportedVersionDao;
 import com.cloud.network.IpAddress;
 import com.cloud.utils.ssh.SshHelper;
@@ -93,6 +98,9 @@ public class KubernetesClusterActionWorkerTest {
 
     KubernetesCluster kubernetesCluster;
 
+    @Mock
+    ConfigurationDao configurationDao;
+
     KubernetesClusterActionWorker actionWorker = null;
 
     final static Long DEFAULT_ID = 1L;
@@ -107,6 +115,7 @@ public class KubernetesClusterActionWorkerTest {
         kubernetesCluster = Mockito.mock(KubernetesCluster.class);
         Mockito.when(kubernetesCluster.getId()).thenReturn(DEFAULT_ID);
         actionWorker = new KubernetesClusterActionWorker(kubernetesCluster, kubernetesClusterManager);
+        actionWorker.configurationDao = configurationDao;
         actionWorker.ipAddressDao = ipAddressDao;
         actionWorker.affinityGroupDao = affinityGroupDao;
         actionWorker.portForwardingRulesDao = portForwardingRulesDao;
@@ -607,5 +616,22 @@ public class KubernetesClusterActionWorkerTest {
         CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class, () ->
                 actionWorker.logTransitStateAndThrow(Level.ERROR, "Scaling failed due to bad offering", null, null, new InvalidParameterValueException("bad offering")));
         Assert.assertEquals("Scaling failed due to bad offering", e.getMessage());
+    }
+
+    @Test
+    public void testGetKubernetesNodeConfigSetsKubernetesVersion() throws IOException {
+        KubernetesSupportedVersionVO version = Mockito.mock(KubernetesSupportedVersionVO.class);
+        Mockito.when(version.getSemanticVersion()).thenReturn("1.33.1");
+        Mockito.when(actionWorker.kubernetesCluster.getKubernetesVersionId()).thenReturn(DEFAULT_ID);
+        Mockito.when(kubernetesSupportedVersionDao.findById(DEFAULT_ID)).thenReturn(version);
+        // the join token and CA hash are filled in with the version
+        actionWorker.joinToken = "abcdef.0123456789abcdef";
+        actionWorker.joinCaCertHash = "sha256:" + "ab".repeat(32);
+        KubernetesClusterActionWorker worker = Mockito.spy(actionWorker);
+        String template = IOUtils.toString(getClass().getResourceAsStream("/conf/k8s-node.yml"), StandardCharsets.UTF_8);
+        Mockito.doReturn(template).when(worker).readK8sConfigFile("/conf/k8s-node.yml");
+        String config = worker.getKubernetesNodeConfig("10.1.1.1", false, false);
+        Assert.assertTrue(config.contains("K8S_VERSION=\"1.33.1\""));
+        Assert.assertFalse(config.contains("{{ k8s.version }}"));
     }
 }

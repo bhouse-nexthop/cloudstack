@@ -195,6 +195,7 @@ public class KubernetesClusterStartWorker extends KubernetesClusterResourceModif
         final String k8sCertificate = "{{ k8s_control.certificate_key }}";
         final String externalCniPlugin = "{{ k8s.external.cni.plugin }}";
         final String setupCsiDriver = "{{ k8s.setup.csi.driver }}";
+        final String k8sVersionKey = "{{ k8s.version }}";
 
         final List<String> addresses = new ArrayList<>();
         addresses.add(controlNodeIp);
@@ -240,6 +241,7 @@ public class KubernetesClusterStartWorker extends KubernetesClusterResourceModif
         initArgs += String.format("--apiserver-cert-extra-sans=%s", serverIp);
         initArgs += String.format(" --kubernetes-version=%s", getKubernetesClusterVersion().getSemanticVersion());
         k8sControlNodeConfig = k8sControlNodeConfig.replace(clusterInitArgsKey, initArgs);
+        k8sControlNodeConfig = k8sControlNodeConfig.replace(k8sVersionKey, getKubernetesClusterVersion().getSemanticVersion());
         k8sControlNodeConfig = k8sControlNodeConfig.replace(ejectIsoKey, String.valueOf(ejectIso));
         k8sControlNodeConfig = k8sControlNodeConfig.replace(etcdEndpointList, endpointList);
         k8sControlNodeConfig = k8sControlNodeConfig.replace(k8sServerIp, serverIp);
@@ -348,6 +350,7 @@ public class KubernetesClusterStartWorker extends KubernetesClusterResourceModif
         final String ejectIsoKey = "{{ k8s.eject.iso }}";
         final String installWaitTime = "{{ k8s.install.wait.time }}";
         final String installReattemptsCount = "{{ k8s.install.reattempts.count }}";
+        final String k8sVersionKey = "{{ k8s.version }}";
 
         final Long waitTime = KubernetesClusterService.KubernetesControlNodeInstallAttemptWait.value();
         final Long reattempts = KubernetesClusterService.KubernetesControlNodeInstallReattempts.value();
@@ -367,6 +370,7 @@ public class KubernetesClusterStartWorker extends KubernetesClusterResourceModif
         k8sControlNodeConfig = k8sControlNodeConfig.replace(clusterTokenKey, joinToken);
         k8sControlNodeConfig = k8sControlNodeConfig.replace(clusterHACertificateKey, certificateKey);
         k8sControlNodeConfig = k8sControlNodeConfig.replace(caCertHashKey, joinCaCertHash);
+        k8sControlNodeConfig = k8sControlNodeConfig.replace(k8sVersionKey, getKubernetesClusterVersion().getSemanticVersion());
         k8sControlNodeConfig = k8sControlNodeConfig.replace(ejectIsoKey, String.valueOf(ejectIso));
         k8sControlNodeConfig = replaceKubeletCloudProviderArg(k8sControlNodeConfig);
         k8sControlNodeConfig = updateKubeConfigWithRegistryDetails(k8sControlNodeConfig);
