@@ -25,6 +25,17 @@ import java.util.Map;
 import com.cloud.agent.api.to.DataTO;
 
 public class CopyCommand extends StorageSubSystemCommand {
+    /**
+     * Option set when the source is removed once the copy succeeds, so the copy may consume it.
+     */
+    public static final String VOLUME_MIGRATION = "volumeMigration";
+
+    /**
+     * Option set when the volume has snapshots that exist only on its primary storage. The copy
+     * must keep them with the volume, or fail.
+     */
+    public static final String KEEP_PRIMARY_SNAPSHOTS = "keepPrimarySnapshots";
+
     private DataTO srcTO;
     private DataTO destTO;
     private DataTO cacheTO;

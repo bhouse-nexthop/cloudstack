@@ -1709,8 +1709,8 @@ public class LibvirtStorageAdaptor implements StorageAdaptor {
         } else {
             newDisk = new KVMPhysicalDisk(destPool.getSourceDir() + "/" + name, name, destPool);
             newDisk.setFormat(PhysicalDiskFormat.RAW);
-            newDisk.setSize(disk.getVirtualSize());
-            newDisk.setVirtualSize(disk.getSize());
+            newDisk.setSize(disk.getSize());
+            newDisk.setVirtualSize(disk.getVirtualSize());
         }
 
         String destPath = newDisk.getPath();

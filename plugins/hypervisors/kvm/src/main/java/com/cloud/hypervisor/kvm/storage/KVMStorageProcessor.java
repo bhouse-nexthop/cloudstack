@@ -39,6 +39,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -104,6 +105,7 @@ import org.apache.commons.lang3.builder.ToStringBuilder;
 import org.apache.commons.lang3.builder.ToStringStyle;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.joda.time.Duration;
 import org.libvirt.Connect;
 import org.libvirt.Domain;
 import org.libvirt.DomainInfo;
@@ -155,6 +157,7 @@ import com.cloud.storage.template.TemplateLocation;
 import com.cloud.utils.Pair;
 import com.cloud.utils.UriUtils;
 import com.cloud.utils.exception.CloudRuntimeException;
+import com.cloud.utils.script.OutputInterpreter;
 import com.cloud.utils.script.Script;
 import com.cloud.utils.storage.S3.S3Utils;
 import com.cloud.vm.VmDetailConstants;
@@ -3179,16 +3182,22 @@ public class KVMStorageProcessor implements StorageProcessor {
             KVMPhysicalDisk newVolume;
             String destVolumeName;
             destPool = storagePoolMgr.getStoragePool(destPrimaryStore.getPoolType(), destPrimaryStore.getUuid());
+            final boolean rbdMigration = !srcPrimaryStore.isManaged() && !destPrimaryStore.isManaged()
+                    && canMigrateRbdImage(cmd, srcVol, destVol, volume.getPool(), destPool);
             if (destPrimaryStore.isManaged()) {
                 if (!storagePoolMgr.connectPhysicalDisk(destPrimaryStore.getPoolType(), destPrimaryStore.getUuid(), destVolumePath, destPrimaryStore.getDetails())) {
                     logger.warn("Failed to connect dest volume {}, in storage pool {}", destVol, destPrimaryStore);
                 }
                 destVolumeName = derivePath(destPrimaryStore, destData, destPrimaryStore.getDetails());
             } else {
-                PhysicalDiskFormat destPoolDefaultFormat = destPool.getDefaultFormat();
-                destFormat = getFormat(destPoolDefaultFormat);
-                final String volumeName = UUID.randomUUID().toString();
-                destVolumeName = volumeName + "." + destFormat.getFileExtension();
+                if (rbdMigration) {
+                    destVolumeName = volume.getName();
+                } else {
+                    PhysicalDiskFormat destPoolDefaultFormat = destPool.getDefaultFormat();
+                    destFormat = getFormat(destPoolDefaultFormat);
+                    final String volumeName = UUID.randomUUID().toString();
+                    destVolumeName = volumeName + "." + destFormat.getFileExtension();
+                }
 
                 // Update path in the command for reconciliation
                 if (StringUtils.isBlank(destVolumePath)) {
@@ -3200,7 +3209,13 @@ public class KVMStorageProcessor implements StorageProcessor {
                 Volume.Type volumeType = srcVol.getVolumeType();
 
                 resource.createOrUpdateLogFileForCommand(cmd, Command.State.PROCESSING_IN_BACKEND);
-                if (srcVol.getPassphrase() != null && (Volume.Type.ROOT.equals(volumeType) || Volume.Type.DATADISK.equals(volumeType))) {
+                if (!rbdMigration && cmd.getOptions() != null && Boolean.parseBoolean(cmd.getOptions().get(CopyCommand.KEEP_PRIMARY_SNAPSHOTS))) {
+                    throw new CloudRuntimeException(String.format("Volume %s has snapshots that exist only on its primary storage and can only be moved "
+                            + "with rbd migration to another pool of the same Ceph cluster", srcVol.getUuid()));
+                }
+                if (rbdMigration) {
+                    newVolume = migrateRbdImage(volume, destPool, cmd.getWaitInMillSeconds());
+                } else if (srcVol.getPassphrase() != null && (Volume.Type.ROOT.equals(volumeType) || Volume.Type.DATADISK.equals(volumeType))) {
                     volume.setQemuEncryptFormat(QemuObject.EncryptFormat.LUKS);
                     newVolume = storagePoolMgr.copyPhysicalDisk(volume, destVolumeName, destPool, cmd.getWaitInMillSeconds(), srcVol.getPassphrase(), destVol.getPassphrase(), srcVol.getProvisioningType());
                 } else {
@@ -3240,6 +3255,98 @@ public class KVMStorageProcessor implements StorageProcessor {
             srcVol.clearPassphrase();
             destVol.clearPassphrase();
         }
+    }
+
+    /**
+     * A volume moved between two pools of the same Ceph cluster can be moved by Ceph itself with
+     * "rbd migration", which keeps the image name and its snapshots. The source image is gone
+     * afterwards, so this is only done when the management server says the copy is a move.
+     */
+    protected boolean canMigrateRbdImage(CopyCommand cmd, VolumeObjectTO srcVol, VolumeObjectTO destVol, KVMStoragePool srcPool, KVMStoragePool destPool) {
+        return cmd.getOptions() != null && Boolean.parseBoolean(cmd.getOptions().get(CopyCommand.VOLUME_MIGRATION))
+                && !srcVol.requiresEncryption() && !destVol.requiresEncryption()
+                && srcPool.getType() == StoragePoolType.RBD && destPool.getType() == StoragePoolType.RBD
+                && srcPool.getAuthUserName() != null
+                && Objects.equals(srcPool.getSourceHost(), destPool.getSourceHost())
+                && srcPool.getSourcePort() == destPool.getSourcePort()
+                && Objects.equals(srcPool.getAuthUserName(), destPool.getAuthUserName())
+                && Objects.equals(srcPool.getAuthSecret(), destPool.getAuthSecret())
+                && !Objects.equals(srcPool.getSourceDir(), destPool.getSourceDir());
+    }
+
+    /**
+     * Moves an RBD image to another pool of the same Ceph cluster with "rbd migration prepare,
+     * execute, commit", keeping its name and snapshots. The image is flattened so that it does not
+     * depend on a template in the source pool, and its data goes to the data pool of the
+     * destination when it has one. Any failure is rolled back with "rbd migration abort".
+     */
+    protected KVMPhysicalDisk migrateRbdImage(KVMPhysicalDisk disk, KVMStoragePool destPool, int timeout) {
+        KVMStoragePool srcPool = disk.getPool();
+        String source = srcPool.getSourceDir() + "/" + disk.getName();
+        String target = destPool.getSourceDir() + "/" + disk.getName();
+        Map<String, String> destDetails = destPool.getDetails();
+        String dataPool = destDetails == null ? null : destDetails.get(KVMPhysicalDisk.RBD_DEFAULT_DATA_POOL);
+
+        // without --data-pool the target keeps the data pool of the source image
+        String targetDataPool = StringUtils.isNotBlank(dataPool) ? dataPool : destPool.getSourceDir();
+
+        logger.info("Migrating RBD image {} to {} with its snapshots", source, target);
+        // the management server started its own timer earlier, so stop a little before the timeout
+        long deadline = timeout > 0 ? System.currentTimeMillis() + timeout * 9L / 10 : Long.MAX_VALUE;
+        String error = runRbdMigrationBefore(deadline, srcPool, "prepare", "--flatten", "--data-pool", targetDataPool, source, target);
+        // a prepare killed by the timeout may already have taken effect
+        boolean mayBePrepared = error == null || Script.ERR_TIMEOUT.equals(error);
+        if (error == null) {
+            error = runRbdMigrationBefore(deadline, srcPool, "execute", target, "--no-progress");
+        }
+        if (error == null) {
+            // not cut short: once commit has started removing the source, abort cannot bring it back
+            error = runRbdMigration(srcPool, timeout, "commit", target, "--no-progress");
+        }
+        if (error != null) {
+            String abortError = runRbdMigration(srcPool, timeout, "abort", target, "--no-progress");
+            if (abortError != null && mayBePrepared) {
+                logger.error("Failed to abort the migration of RBD image {} to {}, it has to be cleaned up by hand: {}", source, target, abortError);
+            } else if (abortError != null) {
+                logger.debug("Nothing to abort after the rejected prepare of RBD image {} to {}: {}", source, target, abortError);
+            }
+            throw new CloudRuntimeException(String.format("Failed to migrate RBD image %s to %s: %s", source, target, error));
+        }
+
+        KVMPhysicalDisk newDisk = new KVMPhysicalDisk(target, disk.getName(), destPool);
+        newDisk.setFormat(PhysicalDiskFormat.RAW);
+        newDisk.setSize(disk.getSize());
+        newDisk.setVirtualSize(disk.getVirtualSize());
+        return newDisk;
+    }
+
+    /**
+     * The management server gives up on the copy after its timeout and keeps the volume on the source
+     * pool, so the migration must not reach commit after that.
+     */
+    private String runRbdMigrationBefore(long deadline, KVMStoragePool pool, String... args) {
+        if (deadline == Long.MAX_VALUE) {
+            return runRbdMigration(pool, 0, args);
+        }
+        long remaining = deadline - System.currentTimeMillis();
+        if (remaining <= 0) {
+            return "timed out";
+        }
+        return runRbdMigration(pool, (int) remaining, args);
+    }
+
+    /**
+     * Runs "rbd migration" with the given arguments. The cephx key goes in CEPH_ARGS rather than on
+     * the command line, where any user of the host could read it. Returns null on success.
+     */
+    protected String runRbdMigration(KVMStoragePool pool, int timeout, String... args) {
+        Script script = new Script("rbd", Duration.millis(timeout), logger);
+        script.add("migration");
+        script.add(args);
+        script.add("--mon-host", pool.getSourceHost() + ":" + pool.getSourcePort(), "--id", pool.getAuthUserName());
+        Map<String, String> environment = new HashMap<>();
+        environment.put("CEPH_ARGS", "--key " + pool.getAuthSecret());
+        return script.execute(new OutputInterpreter.OutputLogger(logger), environment);
     }
 
     private Storage.ImageFormat getFormat(PhysicalDiskFormat format) {
