@@ -182,6 +182,7 @@ import com.cloud.kubernetes.cluster.actionworkers.KubernetesClusterActionWorker;
 import com.cloud.kubernetes.cluster.actionworkers.KubernetesClusterAddWorker;
 import com.cloud.kubernetes.cluster.actionworkers.KubernetesClusterCertificateWorker;
 import com.cloud.kubernetes.cluster.actionworkers.KubernetesClusterDestroyWorker;
+import com.cloud.kubernetes.cluster.actionworkers.KubernetesClusterNodeTaintWorker;
 import com.cloud.kubernetes.cluster.actionworkers.KubernetesClusterRemoveWorker;
 import com.cloud.kubernetes.cluster.actionworkers.KubernetesClusterRollingUpdateWorker;
 import com.cloud.kubernetes.cluster.actionworkers.KubernetesClusterScaleWorker;
@@ -3581,6 +3582,8 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
                     try {
                         if (!isClusterVMsInDesiredState(kubernetesCluster, VirtualMachine.State.Running)) {
                             stateTransitTo(kubernetesCluster.getId(), KubernetesCluster.Event.FaultsDetected);
+                        } else if (hasOutOfServiceTaintedNodes(kubernetesCluster)) {
+                            syncNodeOutOfServiceTaints(kubernetesCluster);
                         }
                     } catch (Exception e) {
                         logger.warn("Failed to run Kubernetes cluster Running state scanner on Kubernetes cluster: {} status scanner", kubernetesCluster, e);
@@ -3609,6 +3612,9 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
                         logger.info("Running Kubernetes cluster state scanner on Kubernetes cluster: {} for state: {}", kubernetesCluster, KubernetesCluster.State.Alert.toString());
                     }
                     try {
+                        if (KubernetesClusterNodeOutOfServiceTaintEnabled.value() || hasOutOfServiceTaintedNodes(kubernetesCluster)) {
+                            syncNodeOutOfServiceTaints(kubernetesCluster);
+                        }
                         if (isClusterVMsInDesiredState(kubernetesCluster, VirtualMachine.State.Running)) {
                             KubernetesClusterStartWorker startWorker =
                                     new KubernetesClusterStartWorker(kubernetesCluster, KubernetesClusterManagerImpl.this);
@@ -4010,6 +4016,20 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
                 KubernetesClusterCertificateUtil.buildAlertState(expiry.getExpires(), threshold), false);
     }
 
+    private boolean hasOutOfServiceTaintedNodes(KubernetesCluster kubernetesCluster) {
+        return kubernetesClusterDetailsDao.findDetail(kubernetesCluster.getId(), KubernetesClusterNodeTaintWorker.OUT_OF_SERVICE_TAINTED_VMS) != null;
+    }
+
+    private void syncNodeOutOfServiceTaints(KubernetesCluster kubernetesCluster) {
+        try {
+            KubernetesClusterNodeTaintWorker taintWorker = new KubernetesClusterNodeTaintWorker(kubernetesCluster, this);
+            taintWorker = ComponentContext.inject(taintWorker);
+            taintWorker.syncOutOfServiceTaints(KubernetesClusterNodeOutOfServiceTaintEnabled.value());
+        } catch (Exception e) {
+            logger.warn("Failed to sync out-of-service node taints on Kubernetes cluster: {}", kubernetesCluster, e);
+        }
+    }
+
     // checks if Kubernetes cluster is in desired state
     private boolean isClusterVMsInDesiredState(KubernetesCluster kubernetesCluster, VirtualMachine.State state) {
         List<KubernetesClusterVmMapVO> clusterVMs = kubernetesClusterVmMapDao.listByClusterId(kubernetesCluster.getId());
@@ -4181,7 +4201,8 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             KubernetesClusterCertificateExpiryAlertDays,
             KubernetesClusterCertificateAutoRenewEnabled,
             KubernetesClusterCertificateAutoRenewDays,
-            KubernetesClusterCertificateRotationTimeout
+            KubernetesClusterCertificateRotationTimeout,
+            KubernetesClusterNodeOutOfServiceTaintEnabled
         };
     }
 }
