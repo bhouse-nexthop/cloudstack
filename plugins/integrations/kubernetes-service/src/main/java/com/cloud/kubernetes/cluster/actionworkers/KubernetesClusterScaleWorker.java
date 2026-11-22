@@ -799,6 +799,11 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
             launchPermissionDao.persist(launchPermission);
         }
         try {
+            createJoinToken(KubernetesClusterService.KubernetesClusterScaleTimeout.value());
+        } catch (CloudRuntimeException e) {
+            logTransitStateToFailedIfNeededAndThrow(Level.ERROR, String.format("Scaling failed for Kubernetes cluster : %s, unable to create a join token", kubernetesCluster.getName()), e);
+        }
+        try {
             clusterVMs = provisionKubernetesClusterNodeVms((int)(newVmCount + kubernetesCluster.getNodeCount()), (int)kubernetesCluster.getNodeCount(), apiPublicIpAddress, kubernetesCluster.getDomainId(), kubernetesCluster.getAccountId());
             updateLoginUserDetails(clusterVMs.stream().map(InternalIdentity::getId).collect(Collectors.toList()));
         } catch (CloudRuntimeException | ManagementServerException | ResourceUnavailableException | InsufficientCapacityException e) {
@@ -819,6 +824,7 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
         kubernetesClusterVO.setNodeCount(clusterSize);
         boolean readyNodesCountValid = waitForScaledUpNodesReady(kubernetesClusterVO, clusterVMs);
         detachIsoKubernetesVMs(clusterVMs);
+        deleteJoinToken();
         deleteTemplateLaunchPermission();
         if (!readyNodesCountValid) { // Scaling failed
             cleanupNewlyCreatedVms(originalVmIds);

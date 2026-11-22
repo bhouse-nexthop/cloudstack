@@ -24,9 +24,12 @@ import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URL;
+import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.util.List;
 import java.util.function.LongSupplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import javax.net.ssl.HttpsURLConnection;
@@ -36,6 +39,9 @@ import javax.net.ssl.TrustManager;
 import com.cloud.kubernetes.cluster.KubernetesClusterVmMapVO;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterVmMapDao;
 import org.apache.cloudstack.utils.security.SSLUtils;
+import org.apache.commons.codec.binary.Hex;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.LogManager;
@@ -86,6 +92,10 @@ public class KubernetesClusterUtil {
 
     public static final String CLUSTER_NODE_READY_COMMAND = "sudo /opt/bin/kubectl get nodes | awk '{if ($1 == \"%s\" && ($2 == \"Ready\" || $2 ~ /^Ready,/)) print $1}'";
     public static final String CLUSTER_NODE_VERSION_COMMAND = "sudo /opt/bin/kubectl get nodes | awk '{if ($1 == \"%s\") print $5}'";
+    private static final SecureRandom RANDOM = new SecureRandom();
+    private static final char[] BOOTSTRAP_TOKEN_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789".toCharArray();
+    private static final Pattern JOIN_TOKEN = Pattern.compile("--token\\s+([a-z0-9]{6}\\.[a-z0-9]{16})(?!\\S)");
+    private static final Pattern JOIN_CA_CERT_HASH = Pattern.compile("--discovery-token-ca-cert-hash\\s+(sha256:[0-9a-f]{64})(?!\\S)");
 
     public static boolean isKubernetesClusterNodeReady(final KubernetesCluster kubernetesCluster, String ipAddress, int port,
                                                        String user, File sshKeyFile, String nodeName) throws Exception {
@@ -382,21 +392,42 @@ public class KubernetesClusterUtil {
         return false;
     }
 
-    public static String generateClusterToken(final KubernetesCluster kubernetesCluster) {
-        String token = kubernetesCluster.getUuid();
-        token = token.replaceAll("-", "");
-        token = token.substring(0, 22);
-        token = token.substring(0, 6) + "." + token.substring(6);
-        return token;
+    public static String generateBootstrapToken() {
+        return RandomStringUtils.random(6, 0, 0, false, false, BOOTSTRAP_TOKEN_CHARS, RANDOM) + "." +
+                RandomStringUtils.random(16, 0, 0, false, false, BOOTSTRAP_TOKEN_CHARS, RANDOM);
     }
 
-    public static String generateClusterHACertificateKey(final KubernetesCluster kubernetesCluster) {
-        String uuid = kubernetesCluster.getUuid();
-        StringBuilder token = new StringBuilder(uuid.replaceAll("-", ""));
-        while (token.length() < 64) {
-            token.append(token);
+    /**
+     * kubeadm treats a TTL of 0 as never expiring, so never pass it one.
+     */
+    public static String getJoinTokenTtl(final long ttlSeconds) {
+        return Math.max(ttlSeconds, 1) + "s";
+    }
+
+    public static String generateCertificateKey() {
+        byte[] key = new byte[32];
+        RANDOM.nextBytes(key);
+        return Hex.encodeHexString(key);
+    }
+
+    public static String getCaCertHash(final PublicKey caPublicKey) {
+        return "sha256:" + DigestUtils.sha256Hex(caPublicKey.getEncoded());
+    }
+
+    /**
+     * Parses the output of kubeadm token create --print-join-command.
+     * @return the token and the CA certificate hash, or null if either is missing
+     */
+    public static Pair<String, String> parseJoinCommand(final String joinCommand) {
+        if (StringUtils.isBlank(joinCommand)) {
+            return null;
         }
-        return token.toString().substring(0, 64);
+        Matcher token = JOIN_TOKEN.matcher(joinCommand);
+        Matcher hash = JOIN_CA_CERT_HASH.matcher(joinCommand);
+        if (!token.find() || !hash.find()) {
+            return null;
+        }
+        return new Pair<>(token.group(1), hash.group(1));
     }
 
     public static boolean clusterNodeVersionMatches(final String version,
