@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.io.File;
 import java.util.UUID;
 
 import org.apache.cloudstack.affinity.AffinityGroupVO;
@@ -30,6 +31,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
+import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 
@@ -53,6 +55,7 @@ import com.cloud.network.rules.dao.PortForwardingRulesDao;
 import com.cloud.uservm.UserVm;
 import com.cloud.utils.Pair;
 import com.cloud.utils.net.Ip;
+import com.cloud.utils.ssh.SshHelper;
 
 @RunWith(MockitoJUnitRunner.class)
 public class KubernetesClusterActionWorkerTest {
@@ -101,6 +104,37 @@ public class KubernetesClusterActionWorkerTest {
         actionWorker.ipAddressDao = ipAddressDao;
         actionWorker.affinityGroupDao = affinityGroupDao;
         actionWorker.portForwardingRulesDao = portForwardingRulesDao;
+    }
+
+    @Test
+    public void testDeleteJoinTokenOnlyOnce() {
+        KubernetesClusterActionWorker worker = Mockito.spy(actionWorker);
+        Mockito.doReturn(new Pair<>("10.1.1.1", 2222)).when(worker).getKubernetesClusterServerIpSshPort(Mockito.nullable(UserVm.class));
+        Mockito.doReturn("cloud").when(worker).getControlNodeLoginUser();
+        Mockito.doReturn(new File("id_rsa")).when(worker).getManagementServerSshPublicKeyFile();
+        worker.joinToken = "abcdef.0123456789abcdef";
+        worker.joinCaCertHash = "sha256:9826a516d7c2f8974dd0a09a64048c5cba6ff67780b01568b13cd3acf92a409f";
+        try (MockedStatic<SshHelper> sshHelper = Mockito.mockStatic(SshHelper.class)) {
+            sshHelper.when(() -> SshHelper.sshExecute(Mockito.anyString(), Mockito.anyInt(), Mockito.anyString(), Mockito.any(),
+                    Mockito.any(), Mockito.anyString(), Mockito.anyInt(), Mockito.anyInt(), Mockito.anyInt()))
+                    .thenReturn(new Pair<>(true, ""));
+            worker.deleteJoinToken();
+            worker.deleteJoinToken();
+            sshHelper.verify(() -> SshHelper.sshExecute(Mockito.eq("10.1.1.1"), Mockito.eq(2222), Mockito.eq("cloud"), Mockito.any(),
+                    Mockito.any(), Mockito.eq("sudo /opt/bin/kubeadm token delete abcdef"), Mockito.anyInt(), Mockito.anyInt(), Mockito.anyInt()));
+            sshHelper.verifyNoMoreInteractions();
+        }
+        Assert.assertNull(worker.joinToken);
+        Assert.assertNull(worker.joinCaCertHash);
+    }
+
+    @Test
+    public void testDeleteJoinTokenControlNodeUnreachable() {
+        KubernetesClusterActionWorker worker = Mockito.spy(actionWorker);
+        Mockito.doThrow(new CloudRuntimeException("no control node")).when(worker).getKubernetesClusterServerIpSshPort(Mockito.nullable(UserVm.class));
+        worker.joinToken = "abcdef.0123456789abcdef";
+        worker.deleteJoinToken();
+        Assert.assertNull(worker.joinToken);
     }
 
     @Test

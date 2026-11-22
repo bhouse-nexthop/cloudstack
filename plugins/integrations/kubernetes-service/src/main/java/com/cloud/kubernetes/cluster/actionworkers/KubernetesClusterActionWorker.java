@@ -1197,9 +1197,9 @@ public class KubernetesClusterActionWorker {
         if (joinToken == null) {
             return;
         }
-        Pair<String, Integer> publicIpSshPort = getKubernetesClusterServerIpSshPort(null);
-        String command = String.format("sudo /opt/bin/kubeadm token delete %s", joinToken.substring(0, 6));
         try {
+            String command = String.format("sudo /opt/bin/kubeadm token delete %s", joinToken.substring(0, 6));
+            Pair<String, Integer> publicIpSshPort = getKubernetesClusterServerIpSshPort(null);
             Pair<Boolean, String> result = SshHelper.sshExecute(publicIpSshPort.first(), publicIpSshPort.second(), getControlNodeLoginUser(),
                     getManagementServerSshPublicKeyFile(), null, command, 10000, 10000, 60000);
             if (!result.first()) {
@@ -1208,6 +1208,8 @@ public class KubernetesClusterActionWorker {
         } catch (Exception e) {
             logger.warn("Failed to delete the join token on Kubernetes cluster {}, it expires on its own", kubernetesCluster, e);
         }
+        joinToken = null;
+        joinCaCertHash = null;
     }
 
     protected File retrieveScriptFile(String filename) {

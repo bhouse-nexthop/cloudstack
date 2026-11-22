@@ -99,6 +99,7 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
                 logger.info(msg);
                 detachCksIsoFromNodesAddedToCluster(nodeIds, kubernetesCluster.getId(), mountCksIsoOnVr);
                 stateTransitTo(kubernetesCluster.getId(), KubernetesCluster.Event.OperationFailed);
+                deleteUnusedJoinToken();
                 ActionEventUtils.onCompletedActionEvent(CallContext.current().getCallingUserId(), CallContext.current().getCallingAccountId(),
                         EventVO.LEVEL_ERROR, KubernetesClusterEventTypes.EVENT_KUBERNETES_CLUSTER_NODES_ADD,
                         msg, kubernetesCluster.getId(), ApiCommandResourceType.KubernetesCluster.toString(), 0);
@@ -121,10 +122,18 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
             if (isOperationStarted()) {
                 stateTransitTo(kubernetesCluster.getId(), KubernetesCluster.Event.OperationFailed);
             }
+            deleteUnusedJoinToken();
             if (e instanceof CloudRuntimeException) {
                 throw (CloudRuntimeException) e;
             }
             throw new CloudRuntimeException(e);
+        }
+    }
+
+    /** A node rebooted with join userdata may still be joining; otherwise the token is no longer needed */
+    private void deleteUnusedJoinToken() {
+        if (finalNodeIds.isEmpty()) {
+            deleteJoinToken();
         }
     }
 
