@@ -18,6 +18,7 @@ package com.cloud.kubernetes.cluster.actionworkers;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -28,6 +29,7 @@ import java.util.UUID;
 import org.apache.cloudstack.affinity.AffinityGroupVO;
 import org.apache.cloudstack.affinity.dao.AffinityGroupDao;
 import org.apache.cloudstack.api.ApiConstants;
+import org.apache.cloudstack.framework.config.ConfigKey;
 import org.apache.cloudstack.framework.config.dao.ConfigurationDao;
 import org.apache.cloudstack.userdata.UserDataManager;
 import org.apache.commons.io.IOUtils;
@@ -46,6 +48,7 @@ import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.kubernetes.cluster.KubernetesCluster;
 import com.cloud.kubernetes.cluster.KubernetesClusterDetailsVO;
 import com.cloud.kubernetes.cluster.KubernetesClusterManagerImpl;
+import com.cloud.kubernetes.cluster.KubernetesClusterService;
 import com.cloud.kubernetes.cluster.KubernetesServiceHelper.KubernetesClusterNodeType;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterAffinityGroupMapDao;
 import com.cloud.kubernetes.cluster.KubernetesClusterVO;
@@ -657,5 +660,62 @@ public class KubernetesClusterActionWorkerTest {
         Assert.assertTrue(config.contains("{% if \"false\" == \"true\" %}"));
         Assert.assertFalse(config.contains("{{ registry.enabled }}"));
         Assert.assertFalse(config.contains("- bash -x /opt/bin/setup-containerd"));
+    }
+
+    private void mockRegistryDetails(String url) {
+        List<KubernetesClusterDetailsVO> details = Arrays.asList(
+                new KubernetesClusterDetailsVO(DEFAULT_ID, ApiConstants.DOCKER_REGISTRY_USER_NAME, "user", true),
+                new KubernetesClusterDetailsVO(DEFAULT_ID, ApiConstants.DOCKER_REGISTRY_PASSWORD, "pass", false),
+                new KubernetesClusterDetailsVO(DEFAULT_ID, ApiConstants.DOCKER_REGISTRY_URL, url, true));
+        Mockito.when(kubernetesClusterDetailsDao.listDetails(DEFAULT_ID)).thenReturn(details);
+    }
+
+    private List<String> getNodeConfigsWithImagesFromRegistry(String imagesFromRegistry) throws Exception {
+        Field f = ConfigKey.class.getDeclaredField("_defaultValue");
+        f.setAccessible(true);
+        Object original = f.get(KubernetesClusterService.KubernetesClusterImagesFromRegistry);
+        f.set(KubernetesClusterService.KubernetesClusterImagesFromRegistry, imagesFromRegistry);
+        try {
+            List<String> configs = new ArrayList<>();
+            for (String file : Arrays.asList("conf/k8s-node.yml", "conf/k8s-control-node.yml", "conf/k8s-control-node-add.yml")) {
+                configs.add(actionWorker.updateKubeConfigWithRegistryDetails(actionWorker.readResourceFile(file)));
+            }
+            return configs;
+        } finally {
+            f.set(KubernetesClusterService.KubernetesClusterImagesFromRegistry, original);
+        }
+    }
+
+    @Test
+    public void testUpdateKubeConfigWithRegistryDetailsImportsImagesByDefault() throws Exception {
+        mockRegistryDetails("https://harbor.example:5000");
+        Assert.assertEquals("false", KubernetesClusterService.KubernetesClusterImagesFromRegistry.defaultValue());
+        for (String config : getNodeConfigsWithImagesFromRegistry("false")) {
+            Assert.assertTrue(config.contains("if [ \"false\" = \"true\" ] && grep"));
+            Assert.assertTrue(config.contains("if [ \"false\" = \"true\" ]; then"));
+            Assert.assertTrue(config.contains("- bash -x /opt/bin/setup-containerd"));
+            Assert.assertFalse(config.contains("{{ registry."));
+        }
+    }
+
+    @Test
+    public void testUpdateKubeConfigWithRegistryDetailsPullsImagesThroughRegistry() throws Exception {
+        mockRegistryDetails("https://harbor.example:5000");
+        for (String config : getNodeConfigsWithImagesFromRegistry("true")) {
+            Assert.assertTrue(config.contains("if [ \"true\" = \"true\" ] && grep"));
+            Assert.assertTrue(config.contains("if [ \"true\" = \"true\" ]; then"));
+            Assert.assertTrue(config.contains("registry.mirrors.\\\"*\\\"]\\n \\\\         endpoint = [\\\"https://harbor.example:5000\\\"]\""));
+            Assert.assertFalse(config.contains("{{ registry."));
+        }
+    }
+
+    @Test
+    public void testUpdateKubeConfigWithRegistryDetailsNoRegistryImportsImages() throws Exception {
+        Mockito.when(kubernetesClusterDetailsDao.listDetails(DEFAULT_ID)).thenReturn(new ArrayList<>());
+        for (String config : getNodeConfigsWithImagesFromRegistry("true")) {
+            Assert.assertTrue(config.contains("if [ \"false\" = \"true\" ] && grep"));
+            Assert.assertTrue(config.contains("if [ \"false\" = \"true\" ]; then"));
+            Assert.assertFalse(config.contains("- bash -x /opt/bin/setup-containerd"));
+        }
     }
 }

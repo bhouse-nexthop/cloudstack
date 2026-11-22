@@ -226,6 +226,16 @@ public interface KubernetesClusterService extends PluggableService, Configurable
             true,
             ConfigKey.Scope.Zone,
             KubernetesServiceEnabled.key());
+    static final ConfigKey<Boolean> KubernetesClusterImagesFromRegistry = new ConfigKey<Boolean>("Advanced", Boolean.class,
+            "cloud.kubernetes.cluster.images.from.registry",
+            "false",
+            "For clusters created with a Docker private registry: set that registry up as the containerd mirror for all registries and pull the " +
+                    "system container images (control plane, CNI and add-ons) through it, instead of importing them from the Kubernetes version ISO. " +
+                    "The registry must serve the images under their upstream repository paths. The mirror applies to every image the nodes pull, " +
+                    "including workloads; containerd falls back to the upstream registry when the mirror does not have an image.",
+            true,
+            ConfigKey.Scope.Account,
+            KubernetesServiceEnabled.key());
 
     KubernetesCluster findById(final Long id);
 
