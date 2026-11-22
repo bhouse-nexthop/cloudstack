@@ -20,7 +20,7 @@ set -e
 
 # Default cloudstack-kubernetes-provider (CCM) release. v1.2.0 is the first
 # release that initialises nodes (sets their providerID and zone) correctly.
-DEFAULT_CCM_VERSION="v1.2.0"
+DEFAULT_CCM_VERSION="v1.3.0"
 CSI_DRIVER_VERSION="v3.0.0"
 
 # Fail on HTTP errors instead of saving the error page as the file
