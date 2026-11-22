@@ -261,7 +261,7 @@ write_files:
       kind: InitConfiguration
       bootstrapTokens:
         - token: "{{ k8s_control_node.cluster.token }}"
-          ttl: "0"
+          ttl: "{{ k8s_control_node.cluster.token.ttl }}"
       nodeRegistration:
         criSocket: /run/containerd/containerd.sock
       localAPIEndpoint:
@@ -288,6 +288,10 @@ write_files:
       EXTERNAL_ETCD_NODES={{ etcd.unstacked_etcd }}
       EXTERNAL_CNI_PLUGIN={{ k8s.external.cni.plugin }}
       MAX_SETUP_CRUCIAL_CMD_ATTEMPTS=3
+      until [[ -f /etc/kubernetes/pki/ca.crt && -f /etc/kubernetes/pki/ca.key ]]; do
+        echo "Waiting for the cluster CA"
+        sleep 5
+      done
       crucial_cmd_attempts=1
       while true; do
         if (( "$crucial_cmd_attempts" > "$MAX_SETUP_CRUCIAL_CMD_ATTEMPTS" )); then
@@ -299,7 +303,7 @@ write_files:
         if [[ ${EXTERNAL_ETCD_NODES} == true ]]; then
           kubeadm init --config /etc/kubernetes/kubeadm-config.yaml --upload-certs
         else
-          kubeadm init --token {{ k8s_control_node.cluster.token }} --token-ttl 0 {{ k8s_control_node.cluster.initargs }} --cri-socket /run/containerd/containerd.sock
+          kubeadm init --token {{ k8s_control_node.cluster.token }} --token-ttl {{ k8s_control_node.cluster.token.ttl }} {{ k8s_control_node.cluster.initargs }} --cri-socket /run/containerd/containerd.sock
         fi
         retval=$?
         set -e

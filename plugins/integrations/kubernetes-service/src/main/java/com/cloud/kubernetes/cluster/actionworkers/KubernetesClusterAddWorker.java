@@ -88,6 +88,7 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
             }
             // take the cluster before attaching the ISO, so that an add which is refused leaves nothing behind
             transitToOperationState(KubernetesCluster.Event.AddNodeRequested);
+            createJoinToken(KubernetesClusterService.KubernetesClusterAddNodeTimeout.value());
             attachCksIsoForNodesAdditionToCluster(nodeIds, kubernetesCluster.getId(), mountCksIsoOnVr);
             String controlNodeGuestIp = getControlVmPrivateIp();
             Ternary<Integer, Long, Long> nodesAddedAndMemory = importNodeToCluster(nodeIds, network, publicIp, controlNodeGuestIp, mountCksIsoOnVr);
@@ -106,6 +107,7 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
             Pair<String, Integer> publicIpSshPort = getKubernetesClusterServerIpSshPort(null);
             KubernetesClusterUtil.validateKubernetesClusterReadyNodesCount(kubernetesCluster, publicIpSshPort.first(), publicIpSshPort.second(),
                     getControlNodeLoginUser(), sshKeyFile, addNodeTimeoutTime, 15000);
+            deleteJoinToken();
             detachCksIsoFromNodesAddedToCluster(nodeIds, kubernetesCluster.getId(), mountCksIsoOnVr);
             stateTransitTo(kubernetesCluster.getId(), KubernetesCluster.Event.OperationSucceeded);
             String description = String.format("Successfully added %s nodes to Kubernetes Cluster %s", nodesAdded, kubernetesCluster.getUuid());
