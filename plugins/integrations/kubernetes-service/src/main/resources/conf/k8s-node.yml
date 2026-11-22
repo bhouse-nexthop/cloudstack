@@ -134,7 +134,7 @@ write_files:
           [ -x /opt/cni/bin/loopback ] && command -v crictl > /dev/null; then
         PREBUILT_BIN_DIR="$dir"
       fi
-      if [ -n "$PREBUILT_BIN_DIR" ] && [ "$PREBUILT_BIN_DIR" != /opt/bin ]; then
+      if [ -n "$PREBUILT_BIN_DIR" ] && [ ! "$PREBUILT_BIN_DIR" -ef /opt/bin ]; then
         mkdir -p /opt/bin
         ln -sf "$PREBUILT_BIN_DIR/kubeadm" "$PREBUILT_BIN_DIR/kubelet" "$PREBUILT_BIN_DIR/kubectl" /opt/bin/
       fi
@@ -285,8 +285,8 @@ write_files:
       modprobe ip_vs_wrr
       modprobe ip_vs_sh
       modprobe nf_conntrack
-      if [[ "$PATH" != *:/opt/bin && "$PATH" != *:/opt/bin:* ]]; then
-        export PATH=$PATH:/opt/bin
+      if [[ "$PATH" != /opt/bin:* ]]; then
+        export PATH=/opt/bin:$PATH
       fi
       kubeadm join {{ k8s_control_node.join_ip }}:6443 --token {{ k8s_control_node.cluster.token }} --discovery-token-ca-cert-hash {{ k8s_control_node.cluster.ca_cert_hash }}
 

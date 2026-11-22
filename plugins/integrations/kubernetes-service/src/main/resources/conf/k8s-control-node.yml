@@ -140,7 +140,7 @@ write_files:
           [ -x /opt/cni/bin/loopback ] && command -v crictl > /dev/null; then
         PREBUILT_BIN_DIR="$dir"
       fi
-      if [ -n "$PREBUILT_BIN_DIR" ] && [ "$PREBUILT_BIN_DIR" != /opt/bin ]; then
+      if [ -n "$PREBUILT_BIN_DIR" ] && [ ! "$PREBUILT_BIN_DIR" -ef /opt/bin ]; then
         mkdir -p /opt/bin
         ln -sf "$PREBUILT_BIN_DIR/kubeadm" "$PREBUILT_BIN_DIR/kubelet" "$PREBUILT_BIN_DIR/kubectl" /opt/bin/
       fi
@@ -298,8 +298,8 @@ write_files:
       exit 0
       fi
 
-      if [[ "$PATH" != *:/opt/bin && "$PATH" != *:/opt/bin:* ]]; then
-        export PATH=$PATH:/opt/bin
+      if [[ "$PATH" != /opt/bin:* ]]; then
+        export PATH=/opt/bin:$PATH
       fi
 
       KUBEADM_INIT_WITH_CONFIG={{ k8s_control.init_with_config }}
@@ -336,8 +336,8 @@ write_files:
         echo "setup-kube-system is running!"
         exit 1
       fi
-      if [[ "$PATH" != *:/opt/bin && "$PATH" != *:/opt/bin:* ]]; then
-        export PATH=$PATH:/opt/bin
+      if [[ "$PATH" != /opt/bin:* ]]; then
+        export PATH=/opt/bin:$PATH
       fi
       export KUBECONFIG=/etc/kubernetes/admin.conf
 
