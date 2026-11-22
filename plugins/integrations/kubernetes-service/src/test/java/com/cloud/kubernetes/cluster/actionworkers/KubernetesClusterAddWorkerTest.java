@@ -33,6 +33,8 @@ import com.cloud.exception.NetworkRuleConflictException;
 import com.cloud.exception.ResourceUnavailableException;
 import com.cloud.kubernetes.cluster.KubernetesCluster;
 import com.cloud.kubernetes.cluster.KubernetesClusterManagerImpl;
+import com.cloud.kubernetes.cluster.KubernetesClusterVmMapVO;
+import com.cloud.kubernetes.cluster.dao.KubernetesClusterVmMapDao;
 import com.cloud.network.IpAddress;
 import com.cloud.network.Network;
 import com.cloud.network.dao.FirewallRulesDao;
@@ -43,6 +45,7 @@ import com.cloud.network.rules.PortForwardingRuleVO;
 import com.cloud.network.rules.RulesService;
 import com.cloud.network.rules.dao.PortForwardingRulesDao;
 import com.cloud.utils.exception.CloudRuntimeException;
+import com.cloud.utils.net.Ip;
 
 @RunWith(MockitoJUnitRunner.class)
 public class KubernetesClusterAddWorkerTest {
@@ -67,6 +70,8 @@ public class KubernetesClusterAddWorkerTest {
     private Network network;
     @Mock
     private IpAddress publicIp;
+    @Mock
+    private KubernetesClusterVmMapDao kubernetesClusterVmMapDao;
 
     private KubernetesClusterAddWorker worker;
 
@@ -77,6 +82,8 @@ public class KubernetesClusterAddWorkerTest {
         worker.portForwardingRulesDao = portForwardingRulesDao;
         worker.firewallService = firewallService;
         worker.rulesService = rulesService;
+        worker.kubernetesClusterVmMapDao = kubernetesClusterVmMapDao;
+        Mockito.lenient().when(publicIp.getAddress()).thenReturn(new Ip("192.0.2.10"));
         Mockito.when(publicIp.getId()).thenReturn(IP_ID);
         Mockito.when(network.getVpcId()).thenReturn(null);
     }
@@ -84,16 +91,23 @@ public class KubernetesClusterAddWorkerTest {
     private PortForwardingRuleVO pfRule(long id, long ipId, int sourcePort, int destPort) {
         PortForwardingRuleVO rule = Mockito.mock(PortForwardingRuleVO.class);
         Mockito.lenient().when(rule.getId()).thenReturn(id);
+        Mockito.lenient().when(rule.getUuid()).thenReturn("uuid-" + id);
         Mockito.lenient().when(rule.getPurpose()).thenReturn(FirewallRule.Purpose.PortForwarding);
         Mockito.lenient().when(rule.getSourceIpAddressId()).thenReturn(ipId);
         Mockito.lenient().when(rule.getSourcePortStart()).thenReturn(sourcePort);
         Mockito.lenient().when(rule.getDestinationPortStart()).thenReturn(destPort);
+        Mockito.lenient().when(rule.getSourcePortEnd()).thenReturn(sourcePort);
+        Mockito.lenient().when(rule.getDestinationPortEnd()).thenReturn(destPort);
+        Mockito.lenient().when(rule.getProtocol()).thenReturn("tcp");
+        Mockito.lenient().when(rule.getVirtualMachineId()).thenReturn(VM_ID);
         return rule;
     }
 
     private FirewallRuleVO firewallRule(long id) {
         FirewallRuleVO rule = Mockito.mock(FirewallRuleVO.class);
         Mockito.when(rule.getId()).thenReturn(id);
+        Mockito.lenient().when(rule.getUuid()).thenReturn("uuid-" + id);
+        Mockito.lenient().when(rule.getSourcePortStart()).thenReturn(SSH_PORT);
         Mockito.lenient().when(rule.getPurpose()).thenReturn(FirewallRule.Purpose.Firewall);
         return rule;
     }
@@ -104,7 +118,7 @@ public class KubernetesClusterAddWorkerTest {
     }
 
     @Test
-    public void revertNetworkRulesRemovesPortForwardingThenFirewallRule() {
+    public void revertNetworkRulesRemovesFirewallThenPortForwardingRule() {
         PortForwardingRuleVO pf = pfRule(1L, IP_ID, SSH_PORT, 22);
         Mockito.when(portForwardingRulesDao.listByVm(VM_ID)).thenReturn(List.of(pf));
         mockFirewallRules(firewallRule(2L));
@@ -114,8 +128,8 @@ public class KubernetesClusterAddWorkerTest {
         worker.revertNetworkRules(network, publicIp, VM_ID, SSH_PORT, Set.of());
 
         InOrder inOrder = Mockito.inOrder(rulesService, firewallService);
-        inOrder.verify(rulesService).revokePortForwardingRule(1L, true);
         inOrder.verify(firewallService).revokeIngressFirewallRule(2L, true);
+        inOrder.verify(rulesService).revokePortForwardingRule(1L, true);
     }
 
     @Test
@@ -142,21 +156,24 @@ public class KubernetesClusterAddWorkerTest {
     }
 
     @Test
-    public void revertNetworkRulesRemovesFirewallRuleWhenPortForwardingRevokeFails() {
+    public void revertNetworkRulesKeepsPortForwardingRuleWhenFirewallRevokeFails() {
         PortForwardingRuleVO pf = pfRule(1L, IP_ID, SSH_PORT, 22);
         Mockito.when(portForwardingRulesDao.listByVm(VM_ID)).thenReturn(List.of(pf));
         mockFirewallRules(firewallRule(2L));
-        Mockito.when(rulesService.revokePortForwardingRule(1L, true)).thenThrow(new CloudRuntimeException("apply failed"));
-        Mockito.when(firewallService.revokeIngressFirewallRule(2L, true)).thenReturn(true);
+        Mockito.when(firewallService.revokeIngressFirewallRule(2L, true)).thenThrow(new CloudRuntimeException("apply failed"));
 
         worker.revertNetworkRules(network, publicIp, VM_ID, SSH_PORT, Set.of());
 
-        Mockito.verify(firewallService).revokeIngressFirewallRule(2L, true);
+        Mockito.verifyNoInteractions(rulesService);
+    }
+
+    private void mockNodeCounts() {
+        Mockito.when(kubernetesCluster.getTotalNodeCount()).thenReturn(2L);
+        Mockito.when(kubernetesCluster.getEtcdNodeCount()).thenReturn(0L);
     }
 
     private KubernetesClusterAddWorker spyForSetup() {
-        Mockito.when(kubernetesCluster.getTotalNodeCount()).thenReturn(2L);
-        Mockito.when(kubernetesCluster.getEtcdNodeCount()).thenReturn(0L);
+        mockNodeCounts();
         return Mockito.spy(worker);
     }
 
@@ -230,5 +247,164 @@ public class KubernetesClusterAddWorkerTest {
 
         Mockito.verify(rulesService).revokePortForwardingRule(1L, true);
         Mockito.verify(rulesService, Mockito.never()).revokePortForwardingRule(6L, true);
+    }
+
+    private FirewallRuleVO ipRule(long id, FirewallRule.Purpose purpose, int start, int end, String... cidrs) {
+        FirewallRuleVO rule = Mockito.mock(FirewallRuleVO.class);
+        Mockito.lenient().when(rule.getId()).thenReturn(id);
+        Mockito.lenient().when(rule.getUuid()).thenReturn("uuid-" + id);
+        Mockito.lenient().when(rule.getPurpose()).thenReturn(purpose);
+        Mockito.lenient().when(rule.getProtocol()).thenReturn("tcp");
+        Mockito.lenient().when(rule.getSourcePortStart()).thenReturn(start);
+        Mockito.lenient().when(rule.getSourcePortEnd()).thenReturn(end);
+        Mockito.lenient().when(rule.getSourceCidrList()).thenReturn(List.of(cidrs));
+        return rule;
+    }
+
+    private void mockIpRules(FirewallRuleVO... rules) {
+        Mockito.when(firewallRulesDao.listByIpAndPurposeAndNotRevoked(IP_ID, null)).thenReturn(List.of(rules));
+    }
+
+    private void mockLeftover() {
+        PortForwardingRuleVO pf = pfRule(1L, IP_ID, SSH_PORT, 22);
+        Mockito.when(portForwardingRulesDao.findById(1L)).thenReturn(pf);
+        mockIpRules(ipRule(1L, FirewallRule.Purpose.PortForwarding, SSH_PORT, SSH_PORT),
+                ipRule(2L, FirewallRule.Purpose.Firewall, SSH_PORT, SSH_PORT, "0.0.0.0/0"));
+    }
+
+    @Test
+    public void removeLeftoverNodeSshRulesRemovesOwnLeftover() {
+        mockNodeCounts();
+        mockLeftover();
+        Mockito.when(rulesService.revokePortForwardingRule(1L, true)).thenReturn(true);
+        Mockito.when(firewallService.revokeIngressFirewallRule(2L, true)).thenReturn(true);
+
+        worker.removeLeftoverNodeSshRules(network, publicIp, List.of(VM_ID));
+
+        InOrder inOrder = Mockito.inOrder(rulesService, firewallService);
+        inOrder.verify(firewallService).revokeIngressFirewallRule(2L, true);
+        inOrder.verify(rulesService).revokePortForwardingRule(1L, true);
+    }
+
+    @Test
+    public void removeLeftoverNodeSshRulesRejectsRuleForVmNotInRequest() {
+        mockNodeCounts();
+        mockLeftover();
+
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class,
+                () -> worker.removeLeftoverNodeSshRules(network, publicIp, List.of(99L)));
+
+        Assert.assertTrue(e.getMessage().contains("192.0.2.10"));
+        Assert.assertTrue(e.getMessage().contains(String.valueOf(SSH_PORT)));
+        Assert.assertTrue(e.getMessage().contains("uuid-1 (PortForwarding, ports 2224-2224)"));
+        Assert.assertTrue(e.getMessage().contains("uuid-2 (Firewall, ports 2224-2224)"));
+        Mockito.verifyNoInteractions(rulesService, firewallService);
+    }
+
+    @Test
+    public void removeLeftoverNodeSshRulesRejectsRuleForClusterNode() {
+        mockNodeCounts();
+        mockLeftover();
+        Mockito.when(kubernetesClusterVmMapDao.findByVmId(VM_ID)).thenReturn(Mockito.mock(KubernetesClusterVmMapVO.class));
+
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class,
+                () -> worker.removeLeftoverNodeSshRules(network, publicIp, List.of(VM_ID)));
+
+        Assert.assertTrue(e.getMessage().contains("uuid-1 (PortForwarding, ports 2224-2224, forwards to a Kubernetes cluster node)"));
+        Assert.assertTrue(e.getMessage().contains("must not be removed"));
+        Mockito.verifyNoInteractions(rulesService, firewallService);
+    }
+
+    @Test
+    public void removeLeftoverNodeSshRulesKeepsUserFirewallRuleNextToLeftover() {
+        mockNodeCounts();
+        PortForwardingRuleVO pf = pfRule(1L, IP_ID, SSH_PORT, 22);
+        Mockito.when(portForwardingRulesDao.findById(1L)).thenReturn(pf);
+        mockIpRules(ipRule(1L, FirewallRule.Purpose.PortForwarding, SSH_PORT, SSH_PORT),
+                ipRule(2L, FirewallRule.Purpose.Firewall, SSH_PORT, SSH_PORT, "203.0.113.0/24"));
+        Mockito.when(rulesService.revokePortForwardingRule(1L, true)).thenReturn(true);
+
+        worker.removeLeftoverNodeSshRules(network, publicIp, List.of(VM_ID));
+
+        Mockito.verify(rulesService).revokePortForwardingRule(1L, true);
+        Mockito.verifyNoInteractions(firewallService);
+    }
+
+    @Test
+    public void removeLeftoverNodeSshRulesIgnoresNonClashingFirewallRange() {
+        mockNodeCounts();
+        mockIpRules(ipRule(2L, FirewallRule.Purpose.Firewall, 2000, 3000, "10.0.0.0/8"));
+
+        worker.removeLeftoverNodeSshRules(network, publicIp, List.of(VM_ID));
+
+        Mockito.verifyNoInteractions(rulesService, firewallService);
+    }
+
+    @Test
+    public void removeLeftoverNodeSshRulesRejectsPortRangeRules() {
+        mockNodeCounts();
+        PortForwardingRuleVO pf = pfRule(1L, IP_ID, 2220, 22);
+        Mockito.when(pf.getSourcePortEnd()).thenReturn(2230);
+        Mockito.when(portForwardingRulesDao.findById(1L)).thenReturn(pf);
+        mockIpRules(ipRule(1L, FirewallRule.Purpose.PortForwarding, 2220, 2230),
+                ipRule(3L, FirewallRule.Purpose.LoadBalancing, SSH_PORT, SSH_PORT));
+
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class,
+                () -> worker.removeLeftoverNodeSshRules(network, publicIp, List.of(VM_ID)));
+
+        Assert.assertTrue(e.getMessage().contains("uuid-1 (PortForwarding, ports 2220-2230)"));
+        Assert.assertTrue(e.getMessage().contains("uuid-3 (LoadBalancing, ports 2224-2224)"));
+        Mockito.verifyNoInteractions(rulesService, firewallService);
+    }
+
+    @Test
+    public void removeLeftoverNodeSshRulesRejectsFirewallRuleWithoutPortForwarding() {
+        mockNodeCounts();
+        mockIpRules(ipRule(2L, FirewallRule.Purpose.Firewall, SSH_PORT, SSH_PORT, "0.0.0.0/0"));
+
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class,
+                () -> worker.removeLeftoverNodeSshRules(network, publicIp, List.of(VM_ID)));
+
+        Assert.assertTrue(e.getMessage().contains("uuid-2 (Firewall, ports 2224-2224)"));
+        Mockito.verifyNoInteractions(firewallService);
+    }
+
+    @Test
+    public void removeLeftoverNodeSshRulesIgnoresOtherPortsAndProtocols() {
+        mockNodeCounts();
+        FirewallRuleVO udp = ipRule(4L, FirewallRule.Purpose.Firewall, SSH_PORT, SSH_PORT, "0.0.0.0/0");
+        Mockito.when(udp.getProtocol()).thenReturn("udp");
+        mockIpRules(ipRule(5L, FirewallRule.Purpose.Firewall, 8080, 8080, "0.0.0.0/0"), udp);
+
+        worker.removeLeftoverNodeSshRules(network, publicIp, List.of(VM_ID));
+
+        Mockito.verifyNoInteractions(rulesService, firewallService);
+    }
+
+    @Test
+    public void removeLeftoverNodeSshRulesKeepsPortForwardingWhenFirewallRevokeFails() {
+        mockNodeCounts();
+        mockLeftover();
+        Mockito.when(firewallService.revokeIngressFirewallRule(2L, true)).thenThrow(new CloudRuntimeException("apply failed"));
+
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class,
+                () -> worker.removeLeftoverNodeSshRules(network, publicIp, List.of(VM_ID)));
+
+        Assert.assertTrue(e.getMessage().contains("uuid-2"));
+        Mockito.verifyNoInteractions(rulesService);
+    }
+
+    @Test
+    public void removeLeftoverNodeSshRulesRejectsCidrRestrictedPortForwarding() {
+        mockNodeCounts();
+        PortForwardingRuleVO pf = pfRule(1L, IP_ID, SSH_PORT, 22);
+        Mockito.when(portForwardingRulesDao.findById(1L)).thenReturn(pf);
+        mockIpRules(ipRule(1L, FirewallRule.Purpose.PortForwarding, SSH_PORT, SSH_PORT, "203.0.113.0/24"));
+
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class,
+                () -> worker.removeLeftoverNodeSshRules(network, publicIp, List.of(VM_ID)));
+
+        Assert.assertTrue(e.getMessage().contains("uuid-1 (PortForwarding, ports 2224-2224)"));
+        Mockito.verifyNoInteractions(rulesService, firewallService);
     }
 }
