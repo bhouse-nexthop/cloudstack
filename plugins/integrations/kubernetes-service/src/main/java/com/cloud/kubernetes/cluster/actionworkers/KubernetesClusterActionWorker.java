@@ -242,6 +242,8 @@ public class KubernetesClusterActionWorker {
     protected File sshKeyFile;
     protected String publicIpAddress;
     protected int sshPort;
+    protected String joinToken;
+    protected String joinCaCertHash;
 
 
     protected final String deploySecretsScriptFilename = "deploy-cloudstack-secret";
@@ -1025,6 +1027,51 @@ public class KubernetesClusterActionWorker {
         return false;
     }
 
+    /**
+     * Creates a bootstrap token on the control node for nodes about to join, and reads the
+     * cluster CA hash they pin with --discovery-token-ca-cert-hash.
+     */
+    protected void createJoinToken(final long ttlSeconds) {
+        Pair<String, Integer> publicIpSshPort = getKubernetesClusterServerIpSshPort(null);
+        String command = String.format("sudo /opt/bin/kubeadm token create --ttl %s --print-join-command", KubernetesClusterUtil.getJoinTokenTtl(ttlSeconds));
+        Pair<String, String> tokenAndHash = null;
+        try {
+            Pair<Boolean, String> result = SshHelper.sshExecute(publicIpSshPort.first(), publicIpSshPort.second(), getControlNodeLoginUser(),
+                    getManagementServerSshPublicKeyFile(), null, command, 10000, 10000, 60000);
+            if (result.first()) {
+                tokenAndHash = KubernetesClusterUtil.parseJoinCommand(result.second());
+            } else {
+                logger.warn("Failed to create a join token on Kubernetes cluster {}: {}", kubernetesCluster, result.second());
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to create a join token on Kubernetes cluster: {}", kubernetesCluster, e);
+        }
+        if (tokenAndHash == null) {
+            throw new CloudRuntimeException(String.format("Failed to create a join token on Kubernetes cluster: %s", kubernetesCluster.getName()));
+        }
+        joinToken = tokenAndHash.first();
+        joinCaCertHash = tokenAndHash.second();
+    }
+
+    protected void deleteJoinToken() {
+        if (joinToken == null) {
+            return;
+        }
+        try {
+            String command = String.format("sudo /opt/bin/kubeadm token delete %s", joinToken.substring(0, 6));
+            Pair<String, Integer> publicIpSshPort = getKubernetesClusterServerIpSshPort(null);
+            Pair<Boolean, String> result = SshHelper.sshExecute(publicIpSshPort.first(), publicIpSshPort.second(), getControlNodeLoginUser(),
+                    getManagementServerSshPublicKeyFile(), null, command, 10000, 10000, 60000);
+            if (!result.first()) {
+                logger.warn("Failed to delete the join token on Kubernetes cluster {}, it expires on its own: {}", kubernetesCluster, result.second());
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to delete the join token on Kubernetes cluster {}, it expires on its own", kubernetesCluster, e);
+        }
+        joinToken = null;
+        joinCaCertHash = null;
+    }
+
     protected File retrieveScriptFile(String filename) {
         File file = null;
         try {
@@ -1259,6 +1306,7 @@ public class KubernetesClusterActionWorker {
         final String sshPubKey = "{{ k8s.ssh.pub.key }}";
         final String joinIpKey = "{{ k8s_control_node.join_ip }}";
         final String clusterTokenKey = "{{ k8s_control_node.cluster.token }}";
+        final String caCertHashKey = "{{ k8s_control_node.cluster.ca_cert_hash }}";
         final String ejectIsoKey = "{{ k8s.eject.iso }}";
         final String routerIpKey = "{{ k8s.vr.iso.mounted.ip }}";
         final String installWaitTime = "{{ k8s.install.wait.time }}";
@@ -1283,7 +1331,8 @@ public class KubernetesClusterActionWorker {
         }
         k8sNodeConfig = k8sNodeConfig.replace(sshPubKey, pubKey);
         k8sNodeConfig = k8sNodeConfig.replace(joinIpKey, joinIp);
-        k8sNodeConfig = k8sNodeConfig.replace(clusterTokenKey, KubernetesClusterUtil.generateClusterToken(kubernetesCluster));
+        k8sNodeConfig = k8sNodeConfig.replace(clusterTokenKey, joinToken);
+        k8sNodeConfig = k8sNodeConfig.replace(caCertHashKey, joinCaCertHash);
         k8sNodeConfig = k8sNodeConfig.replace(ejectIsoKey, String.valueOf(ejectIso));
         k8sNodeConfig = k8sNodeConfig.replace(routerIpKey, routerIp);
         k8sNodeConfig = k8sNodeConfig.replace(installWaitTime, String.valueOf(waitTime));

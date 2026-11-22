@@ -16,6 +16,11 @@
 // under the License.
 package com.cloud.kubernetes.cluster.utils;
 
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.spec.X509EncodedKeySpec;
+import java.util.Base64;
+
 import java.io.File;
 
 import com.cloud.kubernetes.cluster.KubernetesClusterVmMapVO;
@@ -85,5 +90,54 @@ public class KubernetesClusterUtilTest {
         // in the same form as for a new node, not the kubectl output
         Assert.assertEquals("1.25.1", vmMapVO.getNodeVersion());
         Mockito.verify(vmMapDao).update(vmMapVO.getId(), vmMapVO);
+    }
+
+    @Test
+    public void testGenerateBootstrapToken() {
+        String token = KubernetesClusterUtil.generateBootstrapToken();
+        Assert.assertTrue(token.matches("[a-z0-9]{6}\\.[a-z0-9]{16}"));
+        Assert.assertNotEquals(token, KubernetesClusterUtil.generateBootstrapToken());
+    }
+
+    @Test
+    public void testGenerateCertificateKey() {
+        String key = KubernetesClusterUtil.generateCertificateKey();
+        Assert.assertTrue(key.matches("[0-9a-f]{64}"));
+        Assert.assertNotEquals(key, KubernetesClusterUtil.generateCertificateKey());
+    }
+
+    @Test
+    public void testGetCaCertHash() throws Exception {
+        byte[] der = Base64.getDecoder().decode("MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAET4KHpN8Rsx35juCq20Wi0WJyBRRF" +
+                "Yl0p4YCFF6xxCY02Gelg7EYwHdPA/dbs+HrNwBBb/wuUNnEZiw1OQJXIRg==");
+        PublicKey key = KeyFactory.getInstance("EC").generatePublic(new X509EncodedKeySpec(der));
+        Assert.assertEquals("sha256:9826a516d7c2f8974dd0a09a64048c5cba6ff67780b01568b13cd3acf92a409f",
+                KubernetesClusterUtil.getCaCertHash(key));
+    }
+
+    @Test
+    public void testParseJoinCommand() {
+        String hash = "sha256:9826a516d7c2f8974dd0a09a64048c5cba6ff67780b01568b13cd3acf92a409f";
+        Pair<String, String> result = KubernetesClusterUtil.parseJoinCommand(
+                "kubeadm join 10.1.1.10:6443 --token abcdef.0123456789abcdef --discovery-token-ca-cert-hash " + hash + " \n");
+        Assert.assertEquals("abcdef.0123456789abcdef", result.first());
+        Assert.assertEquals(hash, result.second());
+    }
+
+    @Test
+    public void testParseJoinCommandInvalid() {
+        Assert.assertNull(KubernetesClusterUtil.parseJoinCommand(null));
+        Assert.assertNull(KubernetesClusterUtil.parseJoinCommand("failed to load admin kubeconfig"));
+        Assert.assertNull(KubernetesClusterUtil.parseJoinCommand("kubeadm join 10.1.1.10:6443 --token abcdef.0123456789abcdef"));
+        Assert.assertNull(KubernetesClusterUtil.parseJoinCommand(
+                "kubeadm join 10.1.1.10:6443 --token $(reboot) --discovery-token-ca-cert-hash sha256:9826a516d7c2f8974dd0a09a64048c5cba6ff67780b01568b13cd3acf92a409f"));
+        Assert.assertNull(KubernetesClusterUtil.parseJoinCommand(
+                "kubeadm join 10.1.1.10:6443 --token abcdef.0123456789abcdef;id --discovery-token-ca-cert-hash sha256:9826a516d7c2f8974dd0a09a64048c5cba6ff67780b01568b13cd3acf92a409f"));
+    }
+
+    @Test
+    public void testGetJoinTokenTtl() {
+        Assert.assertEquals("3600s", KubernetesClusterUtil.getJoinTokenTtl(3600));
+        Assert.assertEquals("1s", KubernetesClusterUtil.getJoinTokenTtl(0));
     }
 }
