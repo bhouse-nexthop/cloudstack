@@ -196,6 +196,16 @@ public interface KubernetesClusterService extends PluggableService, Configurable
             "Timeout interval (in seconds) in which the certificate rotation of a Kubernetes cluster should be completed",
             true,
             KubernetesServiceEnabled.key());
+    static final ConfigKey<Boolean> KubernetesClusterExternalCloudProviderEnabled = new ConfigKey<Boolean>("Advanced", Boolean.class,
+            "cloud.kubernetes.cluster.external.cloud.provider.enabled",
+            "false",
+            "Whether new Kubernetes clusters on isolated and VPC networks run their kubelets with --cloud-provider=external, so the CloudStack " +
+                    "Kubernetes provider initialises the nodes. Needs a Kubernetes ISO whose provider manifest tolerates the uninitialized taint " +
+                    "(v1.1.0 or later), and the provider must reach endpoint.url without cluster DNS, so use an IP address there or a provider " +
+                    "manifest with hostNetwork. Otherwise nodes stay unschedulable. Only applies when a cluster is created.",
+            true,
+            ConfigKey.Scope.Zone,
+            KubernetesServiceEnabled.key());
 
     KubernetesCluster findById(final Long id);
 

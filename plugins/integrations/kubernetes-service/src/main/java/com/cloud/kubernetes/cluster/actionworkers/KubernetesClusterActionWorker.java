@@ -168,6 +168,12 @@ public class KubernetesClusterActionWorker {
     public static final String CKS_CONFIG_PATH = "/usr/share/cloudstack-management/cks";
     public static final String KUBE_CONFIG_DATA_DETAIL = "kubeConfigData";
     protected static final long KUBE_CONFIG_REFRESH_TIMEOUT_MS = 2 * 60 * 1000L;
+    // Only clusters created with the cloud controller manager wired up get the kubelet flag, so nodes
+    // added to older clusters are not left tainted waiting for a CCM that may never initialise them.
+    public static final String EXTERNAL_CLOUD_PROVIDER_DETAIL = "externalCloudProvider";
+    protected static final String KUBELET_CLOUD_PROVIDER_ARG_KEY = "{{ k8s.kubelet.cloud.provider.arg }}";
+    // Kubelets 1.29+ leave a node without an InternalIP until the CCM sets one unless --node-ip is given
+    protected static final String KUBELET_CLOUD_PROVIDER_ARGS = " --cloud-provider=external$(ip -4 route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == \"src\") print \" --node-ip=\" $(i + 1)}')";
 
     protected Logger logger = LogManager.getLogger(getClass());
 
@@ -1147,6 +1153,10 @@ public class KubernetesClusterActionWorker {
                 String projectId = projectService.findByProjectAccountId(account.getId()).getUuid();
                 command = String.format("%s -p '%s'", command, projectId);
             }
+            DataCenterVO zone = dataCenterDao.findById(kubernetesCluster.getZoneId());
+            if (zone != null) {
+                command = String.format("%s -z '%s'", command, zone.getName().replace("'", "'\\''"));
+            }
             Pair<Boolean, String> result = SshHelper.sshExecute(publicIpAddress, sshPort, getControlNodeLoginUser(),
                     pkFile, null, command, 10000, 10000, 60000);
             return result.first();
@@ -1284,6 +1294,15 @@ public class KubernetesClusterActionWorker {
         return false;
     }
 
+    protected boolean isExternalCloudProviderEnabled() {
+        KubernetesClusterDetailsVO detail = kubernetesClusterDetailsDao.findDetail(kubernetesCluster.getId(), EXTERNAL_CLOUD_PROVIDER_DETAIL);
+        return detail != null && Boolean.parseBoolean(detail.getValue());
+    }
+
+    protected String replaceKubeletCloudProviderArg(String k8sConfig) {
+        return k8sConfig.replace(KUBELET_CLOUD_PROVIDER_ARG_KEY, isExternalCloudProviderEnabled() ? KUBELET_CLOUD_PROVIDER_ARGS : "");
+    }
+
     protected boolean deployProvider() {
         Network network = networkDao.findById(kubernetesCluster.getNetworkId());
         // Since the provider creates IP addresses, don't deploy it unless the underlying network supports it
@@ -1309,8 +1328,7 @@ public class KubernetesClusterActionWorker {
                 copyScripts(publicIpAddress, sshPort);
 
                 if (!createCloudStackSecret(keys)) {
-                    logTransitStateAndThrow(Level.ERROR, String.format("Failed to setup keys for Kubernetes cluster %s",
-                            kubernetesCluster.getName()), kubernetesCluster.getId(), KubernetesCluster.Event.OperationFailed);
+                    throw new CloudRuntimeException(String.format("Failed to setup keys for Kubernetes cluster %s", kubernetesCluster.getName()));
                 }
 
                 // If at first you don't succeed ...
@@ -1323,7 +1341,7 @@ public class KubernetesClusterActionWorker {
             return true;
         } catch (Exception e) {
             String msg = String.format("Failed to deploy kubernetes provider: %s : %s", kubernetesCluster.getName(), e.getMessage());
-            logAndThrow(Level.ERROR, msg);
+            logAndThrow(Level.ERROR, msg, e);
             return false;
         }
     }
@@ -1465,6 +1483,7 @@ public class KubernetesClusterActionWorker {
         k8sNodeConfig = k8sNodeConfig.replace(routerIpKey, routerIp);
         k8sNodeConfig = k8sNodeConfig.replace(installWaitTime, String.valueOf(waitTime));
         k8sNodeConfig = k8sNodeConfig.replace(installReattemptsCount, String.valueOf(reattempts));
+        k8sNodeConfig = replaceKubeletCloudProviderArg(k8sNodeConfig);
 
         k8sNodeConfig = updateKubeConfigWithRegistryDetails(k8sNodeConfig);
 

@@ -499,4 +499,32 @@ public class KubernetesClusterActionWorkerTest {
         Assert.assertEquals(new Pair<>("192.168.0.5", 22), actionWorker.getNodeSshAddress(vm, 1));
         Mockito.verifyNoInteractions(portForwardingRulesDao);
     }
+
+    private void mockExternalCloudProviderDetail(String value) {
+        KubernetesClusterDetailsVO detail = value == null ? null :
+                new KubernetesClusterDetailsVO(DEFAULT_ID, KubernetesClusterActionWorker.EXTERNAL_CLOUD_PROVIDER_DETAIL, value, false);
+        Mockito.when(kubernetesClusterDetailsDao.findDetail(DEFAULT_ID, KubernetesClusterActionWorker.EXTERNAL_CLOUD_PROVIDER_DETAIL)).thenReturn(detail);
+    }
+
+    @Test
+    public void testReplaceKubeletCloudProviderArgEnabled() {
+        mockExternalCloudProviderDetail("true");
+        String config = "KUBELET_EXTRA_ARGS=--cgroup-driver=systemd" + KubernetesClusterActionWorker.KUBELET_CLOUD_PROVIDER_ARG_KEY;
+        String result = actionWorker.replaceKubeletCloudProviderArg(config);
+        Assert.assertTrue(result.startsWith("KUBELET_EXTRA_ARGS=--cgroup-driver=systemd --cloud-provider=external"));
+        Assert.assertFalse(result.contains("{{"));
+    }
+
+    @Test
+    public void testReplaceKubeletCloudProviderArgClusterWithoutDetail() {
+        mockExternalCloudProviderDetail(null);
+        String config = "KUBELET_EXTRA_ARGS=--cgroup-driver=systemd" + KubernetesClusterActionWorker.KUBELET_CLOUD_PROVIDER_ARG_KEY;
+        Assert.assertEquals("KUBELET_EXTRA_ARGS=--cgroup-driver=systemd", actionWorker.replaceKubeletCloudProviderArg(config));
+    }
+
+    @Test
+    public void testIsExternalCloudProviderEnabledFalseValue() {
+        mockExternalCloudProviderDetail("false");
+        Assert.assertFalse(actionWorker.isExternalCloudProviderEnabled());
+    }
 }
