@@ -2447,7 +2447,7 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
         }
     }
 
-    private void validateVolumeResizeWithNewDiskOfferingAndLoad(VolumeVO volume, DiskOfferingVO existingDiskOffering, DiskOfferingVO newDiskOffering, Long[] newSize, Long[] newMinIops, Long[] newMaxIops, Integer[] newHypervisorSnapshotReserve) {
+    void validateVolumeResizeWithNewDiskOfferingAndLoad(VolumeVO volume, DiskOfferingVO existingDiskOffering, DiskOfferingVO newDiskOffering, Long[] newSize, Long[] newMinIops, Long[] newMaxIops, Integer[] newHypervisorSnapshotReserve) {
         if (newDiskOffering.getRemoved() != null) {
             throw new InvalidParameterValueException("Requested disk offering has been removed.");
         }
@@ -2487,14 +2487,17 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
         Long instanceId = volume.getInstanceId();
         VMInstanceVO vmInstanceVO = _vmInstanceDao.findById(instanceId);
 
-        checkIfVolumeCanResizeWithNewDiskOffering(volume, existingDiskOffering, newDiskOffering, newSize[0], vmInstanceVO);
+        checkIfVolumeCanResizeWithNewDiskOffering(volume, existingDiskOffering, newDiskOffering, newSize[0], newMinIops[0], newMaxIops[0], vmInstanceVO);
         checkIfVolumeIsRootAndVmIsRunning(newSize[0], volume, vmInstanceVO);
 
     }
 
-    private void checkIfVolumeCanResizeWithNewDiskOffering(VolumeVO volume, DiskOfferingVO existingDiskOffering, DiskOfferingVO newDiskOffering, Long newSize, VMInstanceVO vmInstanceVO) {
+    private void checkIfVolumeCanResizeWithNewDiskOffering(VolumeVO volume, DiskOfferingVO existingDiskOffering, DiskOfferingVO newDiskOffering, Long newSize,
+            Long newMinIops, Long newMaxIops, VMInstanceVO vmInstanceVO) {
         if (existingDiskOffering.getId() == newDiskOffering.getId() &&
-                (!newDiskOffering.isCustomized() || (newDiskOffering.isCustomized() && Objects.equals(volume.getSize(), newSize << 30)))) {
+                (!newDiskOffering.isCustomized() || (!newDiskOffering.isComputeOnly() && Objects.equals(volume.getSize(), newSize)
+                        && compareEqualsIncludingNullOrZero(newMinIops, volume.getMinIops())
+                        && compareEqualsIncludingNullOrZero(newMaxIops, volume.getMaxIops())))) {
             throw new InvalidParameterValueException(String.format("Volume %s is already having disk offering %s", volume, newDiskOffering.getUuid()));
         }
 
