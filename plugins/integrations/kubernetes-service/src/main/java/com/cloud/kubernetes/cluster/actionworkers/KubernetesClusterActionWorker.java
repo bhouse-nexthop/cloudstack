@@ -1342,6 +1342,7 @@ public class KubernetesClusterActionWorker {
         final String routerIpKey = "{{ k8s.vr.iso.mounted.ip }}";
         final String installWaitTime = "{{ k8s.install.wait.time }}";
         final String installReattemptsCount = "{{ k8s.install.reattempts.count }}";
+        final String k8sVersionKey = "{{ k8s.version }}";
 
         final Long waitTime = KubernetesClusterService.KubernetesWorkerNodeInstallAttemptWait.value();
         final Long reattempts = KubernetesClusterService.KubernetesWorkerNodeInstallReattempts.value();
@@ -1369,6 +1370,8 @@ public class KubernetesClusterActionWorker {
         k8sNodeConfig = k8sNodeConfig.replace(installWaitTime, String.valueOf(waitTime));
         k8sNodeConfig = k8sNodeConfig.replace(installReattemptsCount, String.valueOf(reattempts));
         k8sNodeConfig = replaceKubeletCloudProviderArg(k8sNodeConfig);
+        KubernetesSupportedVersion version = kubernetesSupportedVersionDao.findById(kubernetesCluster.getKubernetesVersionId());
+        k8sNodeConfig = k8sNodeConfig.replace(k8sVersionKey, version == null ? "" : version.getSemanticVersion());
 
         k8sNodeConfig = updateKubeConfigWithRegistryDetails(k8sNodeConfig);
 
