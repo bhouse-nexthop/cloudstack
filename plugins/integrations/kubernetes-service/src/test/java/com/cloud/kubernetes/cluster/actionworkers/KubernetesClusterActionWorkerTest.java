@@ -576,11 +576,12 @@ public class KubernetesClusterActionWorkerTest {
         KubernetesSupportedVersionVO version = Mockito.mock(KubernetesSupportedVersionVO.class);
         Mockito.when(version.getSemanticVersion()).thenReturn("1.33.1");
         Mockito.when(actionWorker.kubernetesCluster.getKubernetesVersionId()).thenReturn(DEFAULT_ID);
-        Mockito.when(actionWorker.kubernetesCluster.getUuid()).thenReturn(UUID.randomUUID().toString());
         Mockito.when(kubernetesSupportedVersionDao.findById(DEFAULT_ID)).thenReturn(version);
         KubernetesClusterActionWorker worker = Mockito.spy(actionWorker);
         String template = IOUtils.toString(getClass().getResourceAsStream("/conf/k8s-node.yml"), StandardCharsets.UTF_8);
         Mockito.doReturn(template).when(worker).readK8sConfigFile("/conf/k8s-node.yml");
+        worker.joinToken = "abcdef.0123456789abcdef";
+        worker.joinCaCertHash = "sha256:00";
         String config = worker.getKubernetesNodeConfig("10.1.1.1", false, false);
         Assert.assertTrue(config.contains("K8S_VERSION=\"1.33.1\""));
         Assert.assertFalse(config.contains("{{ k8s.version }}"));
