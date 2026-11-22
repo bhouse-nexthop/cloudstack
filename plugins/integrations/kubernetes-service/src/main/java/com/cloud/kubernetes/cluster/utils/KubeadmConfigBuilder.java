@@ -17,6 +17,7 @@
 package com.cloud.kubernetes.cluster.utils;
 
 import java.io.IOException;
+import java.io.StringReader;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -42,6 +43,9 @@ import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
 import com.google.gson.reflect.TypeToken;
+import com.google.gson.stream.JsonReader;
+import com.google.gson.stream.JsonToken;
+import com.google.gson.stream.MalformedJsonException;
 
 /**
  * Validates the user supplied kube-apiserver and kubelet settings of a CKS cluster and renders
@@ -68,7 +72,8 @@ public final class KubeadmConfigBuilder {
     private static final Set<String> MANAGED_API_SERVER_ARGS = Set.of("audit-policy-file", "audit-log-path",
             "advertise-address", "bind-address", "secure-port", "authorization-mode", "service-cluster-ip-range", "client-ca-file",
             "tls-cert-file", "tls-private-key-file", "etcd-servers", "etcd-cafile", "etcd-certfile", "etcd-keyfile",
-            "kubelet-client-certificate", "kubelet-client-key", "service-account-key-file", "service-account-signing-key-file");
+            "kubelet-client-certificate", "kubelet-client-key", "service-account-key-file", "service-account-signing-key-file",
+            "anonymous-auth", "enable-bootstrap-token-auth", "allow-privileged");
     private static final Set<String> MANAGED_KUBELET_FIELDS = Set.of("apiVersion", "kind",
             "authentication", "authorization", "cgroupDriver", "clusterDNS", "clusterDomain", "staticPodPath");
     private static final Map<String, String> AUDIT_LOG_DEFAULTS = Map.of(
@@ -124,9 +129,12 @@ public final class KubeadmConfigBuilder {
             throw new InvalidParameterValueException(String.format("Kubelet configuration can not be longer than %d characters", MAX_KUBELET_CONFIG_LENGTH));
         }
         JsonElement config;
-        try {
-            config = JsonParser.parseString(kubeletConfig);
-        } catch (JsonParseException e) {
+        try (JsonReader reader = new JsonReader(new StringReader(kubeletConfig))) {
+            config = GSON.getAdapter(JsonElement.class).read(reader);
+            if (reader.peek() != JsonToken.END_DOCUMENT) {
+                throw new MalformedJsonException("unexpected data after the JSON object");
+            }
+        } catch (IOException | IllegalStateException | JsonParseException e) {
             throw new InvalidParameterValueException("Kubelet configuration must be a JSON object: " + e.getMessage());
         }
         if (!config.isJsonObject() || config.getAsJsonObject().size() == 0) {

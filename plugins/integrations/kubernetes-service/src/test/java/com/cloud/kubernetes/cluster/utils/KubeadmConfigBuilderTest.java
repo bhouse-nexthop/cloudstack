@@ -135,6 +135,11 @@ public class KubeadmConfigBuilderTest {
     }
 
     @Test(expected = InvalidParameterValueException.class)
+    public void apiServerArgNeededToJoin() {
+        KubeadmConfigBuilder.validateApiServerArgs(Map.of("anonymous-auth", "false"));
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
     public void apiServerArgSecurePort() {
         KubeadmConfigBuilder.validateApiServerArgs(Map.of("secure-port", "7443"));
     }
@@ -163,6 +168,18 @@ public class KubeadmConfigBuilderTest {
     @Test(expected = InvalidParameterValueException.class)
     public void kubeletConfigNotJson() {
         KubeadmConfigBuilder.normalizeKubeletConfig("systemReserved: {cpu: 500m}");
+    }
+
+    @Test
+    public void kubeletConfigNotStrictJson() {
+        for (String config : new String[] {"{maxPods: 200}", "{'maxPods': '200'}", "{\"maxPods\": 200} {}"}) {
+            try {
+                KubeadmConfigBuilder.normalizeKubeletConfig(config);
+                Assert.fail("accepted " + config);
+            } catch (InvalidParameterValueException e) {
+                Assert.assertTrue(e.getMessage().startsWith("Kubelet configuration must be a JSON object"));
+            }
+        }
     }
 
     @Test(expected = InvalidParameterValueException.class)
