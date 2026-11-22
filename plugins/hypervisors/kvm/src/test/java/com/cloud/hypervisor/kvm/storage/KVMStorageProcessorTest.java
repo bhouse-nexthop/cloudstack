@@ -26,13 +26,17 @@ import com.ceph.rbd.RbdImage;
 import com.cloud.exception.InternalErrorException;
 import com.cloud.hypervisor.kvm.resource.LibvirtComputingResource;
 import com.cloud.hypervisor.kvm.resource.LibvirtDomainXMLParser;
-import com.cloud.storage.Storage.StoragePoolType;
 import com.cloud.hypervisor.kvm.resource.LibvirtVMDef;
+import com.cloud.agent.api.Answer;
 import com.cloud.storage.Storage;
+import com.cloud.storage.Storage.StoragePoolType;
+import org.apache.cloudstack.utils.qemu.QemuImg.PhysicalDiskFormat;
+import org.apache.cloudstack.storage.to.PrimaryDataStoreTO;
 import com.cloud.storage.template.TemplateConstants;
 import com.cloud.utils.Pair;
 import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.utils.script.Script;
+import org.apache.cloudstack.storage.command.CopyCommand;
 import org.apache.cloudstack.storage.to.SnapshotObjectTO;
 import org.apache.cloudstack.storage.to.VolumeObjectTO;
 import org.apache.cloudstack.utils.qemu.QemuImageOptions;
@@ -65,6 +69,7 @@ import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -794,5 +799,177 @@ public class KVMStorageProcessorTest {
         // The libvirt hot-plug apply-order bug is RBD-specific; other pool types are not gated, and the libvirt
         // version is not even consulted for them.
         storageProcessor.ensureLibvirtSupportsEncryptedRbdHotplug(StoragePoolType.NetworkFilesystem);
+    }
+
+    private KVMStoragePool mockRbdPool(String sourceDir) {
+        KVMStoragePool pool = Mockito.mock(KVMStoragePool.class);
+        Mockito.lenient().when(pool.getType()).thenReturn(StoragePoolType.RBD);
+        Mockito.lenient().when(pool.getSourceHost()).thenReturn("10.0.0.1");
+        Mockito.lenient().when(pool.getSourcePort()).thenReturn(6789);
+        Mockito.lenient().when(pool.getAuthUserName()).thenReturn("cloudstack");
+        Mockito.lenient().when(pool.getAuthSecret()).thenReturn("secret");
+        Mockito.lenient().when(pool.getSourceDir()).thenReturn(sourceDir);
+        return pool;
+    }
+
+    /** An unencrypted volume as the management server sends it: an empty passphrase, not null. */
+    private VolumeObjectTO plainVolume() {
+        return volumeWithPassphrase(new byte[0]);
+    }
+
+    private VolumeObjectTO volumeWithPassphrase(byte[] passphrase) {
+        VolumeObjectTO volume = new VolumeObjectTO();
+        volume.setPassphrase(passphrase);
+        return volume;
+    }
+
+    private CopyCommand mockCopyCommand(boolean volumeMigration) {
+        CopyCommand cmd = Mockito.mock(CopyCommand.class);
+        Map<String, String> options = new HashMap<>();
+        if (volumeMigration) {
+            options.put(CopyCommand.VOLUME_MIGRATION, "true");
+        }
+        Mockito.lenient().when(cmd.getOptions()).thenReturn(options);
+        return cmd;
+    }
+
+    @Test
+    public void canMigrateRbdImageBetweenPoolsOfTheSameCluster() {
+        VolumeObjectTO plain = plainVolume();
+        Assert.assertTrue(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), plain, plain,
+                mockRbdPool("vm-images"), mockRbdPool("vm-images-ec")));
+    }
+
+    @Test
+    public void canMigrateRbdImageNotWhenTheCopyIsNotAMove() {
+        VolumeObjectTO plain = plainVolume();
+        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(false), plain, plain,
+                mockRbdPool("vm-images"), mockRbdPool("vm-images-ec")));
+    }
+
+    @Test
+    public void canMigrateRbdImageNotIntoTheSameCephPool() {
+        VolumeObjectTO plain = plainVolume();
+        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), plain, plain,
+                mockRbdPool("vm-images"), mockRbdPool("vm-images")));
+    }
+
+    @Test
+    public void canMigrateRbdImageNotToAnotherCluster() {
+        VolumeObjectTO plain = plainVolume();
+        KVMStoragePool destPool = mockRbdPool("vm-images-ec");
+        Mockito.when(destPool.getSourceHost()).thenReturn("10.0.0.2");
+        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), plain, plain,
+                mockRbdPool("vm-images"), destPool));
+    }
+
+    @Test
+    public void canMigrateRbdImageNotForAnEncryptedVolume() {
+        VolumeObjectTO plain = plainVolume();
+        VolumeObjectTO encrypted = volumeWithPassphrase("passphrase".getBytes());
+        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), encrypted, plain,
+                mockRbdPool("vm-images"), mockRbdPool("vm-images-ec")));
+        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), plain, encrypted,
+                mockRbdPool("vm-images"), mockRbdPool("vm-images-ec")));
+    }
+
+    @Test
+    public void canMigrateRbdImageWhenThePassphraseIsNull() {
+        VolumeObjectTO noPassphrase = volumeWithPassphrase(null);
+        Assert.assertTrue(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), noPassphrase, noPassphrase,
+                mockRbdPool("vm-images"), mockRbdPool("vm-images-ec")));
+    }
+
+    private VolumeObjectTO rbdVolumeOnPool(String poolUuid) {
+        PrimaryDataStoreTO store = Mockito.mock(PrimaryDataStoreTO.class);
+        Mockito.lenient().when(store.getPoolType()).thenReturn(StoragePoolType.RBD);
+        Mockito.lenient().when(store.getUuid()).thenReturn(poolUuid);
+        VolumeObjectTO volume = plainVolume();
+        volume.setDataStore(store);
+        volume.setPath(RBD_IMAGE_NAME);
+        volume.setFormat(Storage.ImageFormat.RAW);
+        return volume;
+    }
+
+    @Test
+    public void copyVolumeFromPrimaryToPrimaryFailsWhenPrimaryOnlySnapshotsCannotBeKept() {
+        VolumeObjectTO srcVol = rbdVolumeOnPool("src-pool");
+        VolumeObjectTO destVol = rbdVolumeOnPool("dest-pool");
+        CopyCommand cmd = Mockito.mock(CopyCommand.class);
+        Mockito.when(cmd.getSrcTO()).thenReturn(srcVol);
+        Mockito.when(cmd.getDestTO()).thenReturn(destVol);
+        Map<String, String> options = new HashMap<>();
+        options.put(CopyCommand.VOLUME_MIGRATION, "true");
+        options.put(CopyCommand.KEEP_PRIMARY_SNAPSHOTS, "true");
+        Mockito.when(cmd.getOptions()).thenReturn(options);
+        KVMStoragePool srcPool = mockRbdPool("vm-images");
+        KVMStoragePool destPool = mockRbdPool("vm-images-ec");
+        // another Ceph cluster, so the image cannot be moved with rbd migration
+        Mockito.when(destPool.getSourceHost()).thenReturn("10.0.0.2");
+        Mockito.when(destPool.getDefaultFormat()).thenReturn(PhysicalDiskFormat.RAW);
+        Mockito.when(storagePoolManager.getPhysicalDisk(StoragePoolType.RBD, "src-pool", RBD_IMAGE_NAME))
+                .thenReturn(new KVMPhysicalDisk("vm-images/" + RBD_IMAGE_NAME, RBD_IMAGE_NAME, srcPool));
+        Mockito.when(storagePoolManager.getStoragePool(StoragePoolType.RBD, "dest-pool")).thenReturn(destPool);
+
+        Answer answer = storageProcessor.copyVolumeFromPrimaryToPrimary(cmd);
+
+        Assert.assertFalse(answer.getResult());
+        Assert.assertTrue(answer.getDetails().contains("snapshots that exist only on its primary storage"));
+        Mockito.verify(storagePoolManager, Mockito.never()).copyPhysicalDisk(Mockito.any(), Mockito.any(), Mockito.any(), Mockito.anyInt());
+    }
+
+    @Test
+    public void migrateRbdImageKeepsTheNameAndUsesTheDataPool() {
+        KVMStoragePool srcPool = mockRbdPool("vm-images");
+        KVMStoragePool destPool = mockRbdPool("vm-images-ec");
+        Mockito.when(destPool.getDetails()).thenReturn(Map.of(KVMPhysicalDisk.RBD_DEFAULT_DATA_POOL, "vm-images-ec-data"));
+        KVMPhysicalDisk disk = new KVMPhysicalDisk("vm-images/" + RBD_IMAGE_NAME, RBD_IMAGE_NAME, srcPool);
+        disk.setSize(1000L);
+        disk.setVirtualSize(2000L);
+        Mockito.doReturn(null).when(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.any(String[].class));
+
+        KVMPhysicalDisk newDisk = storageProcessorSpy.migrateRbdImage(disk, destPool, 1000);
+
+        Mockito.verify(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("prepare"), Mockito.eq("--flatten"),
+                Mockito.eq("--data-pool"), Mockito.eq("vm-images-ec-data"),
+                Mockito.eq("vm-images/" + RBD_IMAGE_NAME), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME));
+        Mockito.verify(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("execute"), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME), Mockito.eq("--no-progress"));
+        Mockito.verify(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("commit"), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME), Mockito.eq("--no-progress"));
+        Mockito.verify(storageProcessorSpy, Mockito.never()).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("abort"), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME), Mockito.eq("--no-progress"));
+        Assert.assertEquals(RBD_IMAGE_NAME, newDisk.getName());
+        Assert.assertEquals("vm-images-ec/" + RBD_IMAGE_NAME, newDisk.getPath());
+        Assert.assertEquals(destPool, newDisk.getPool());
+        Assert.assertEquals(1000L, newDisk.getSize());
+        Assert.assertEquals(2000L, newDisk.getVirtualSize());
+    }
+
+    @Test
+    public void migrateRbdImageAbortsWhenAStepFails() {
+        KVMStoragePool srcPool = mockRbdPool("vm-images");
+        KVMStoragePool destPool = mockRbdPool("vm-images-ec");
+        KVMPhysicalDisk disk = new KVMPhysicalDisk("vm-images/" + RBD_IMAGE_NAME, RBD_IMAGE_NAME, srcPool);
+        Mockito.doReturn(null).when(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.any(String[].class));
+        Mockito.doReturn("failed").when(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("execute"), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME), Mockito.eq("--no-progress"));
+
+        Assert.assertThrows(CloudRuntimeException.class, () -> storageProcessorSpy.migrateRbdImage(disk, destPool, 1000));
+
+        Mockito.verify(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("prepare"), Mockito.eq("--flatten"),
+                Mockito.eq("--data-pool"), Mockito.eq("vm-images-ec"),
+                Mockito.eq("vm-images/" + RBD_IMAGE_NAME), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME));
+        Mockito.verify(storageProcessorSpy, Mockito.never()).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("commit"), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME), Mockito.eq("--no-progress"));
+        Mockito.verify(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("abort"), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME), Mockito.eq("--no-progress"));
+    }
+
+    @Test
+    public void migrateRbdImageStopsAndAbortsWhenPrepareFails() {
+        KVMStoragePool srcPool = mockRbdPool("vm-images");
+        KVMStoragePool destPool = mockRbdPool("vm-images-ec");
+        KVMPhysicalDisk disk = new KVMPhysicalDisk("vm-images/" + RBD_IMAGE_NAME, RBD_IMAGE_NAME, srcPool);
+        Mockito.doReturn("failed").when(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.any(String[].class));
+
+        Assert.assertThrows(CloudRuntimeException.class, () -> storageProcessorSpy.migrateRbdImage(disk, destPool, 1000));
+
+        Mockito.verify(storageProcessorSpy, Mockito.never()).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("execute"), Mockito.anyString(), Mockito.anyString());
+        Mockito.verify(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("abort"), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME), Mockito.eq("--no-progress"));
     }
 }

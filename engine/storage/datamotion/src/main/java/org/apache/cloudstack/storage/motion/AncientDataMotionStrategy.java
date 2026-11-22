@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 import javax.inject.Inject;
 
@@ -50,7 +51,10 @@ import org.apache.cloudstack.framework.async.AsyncCompletionCallback;
 import org.apache.cloudstack.framework.config.dao.ConfigurationDao;
 import org.apache.cloudstack.secstorage.heuristics.HeuristicType;
 import org.apache.cloudstack.storage.RemoteHostEndPoint;
+import org.apache.cloudstack.storage.command.CopyCmdAnswer;
 import org.apache.cloudstack.storage.command.CopyCommand;
+import org.apache.cloudstack.storage.datastore.db.SnapshotDataStoreDao;
+import org.apache.cloudstack.storage.datastore.db.SnapshotDataStoreVO;
 import org.apache.cloudstack.storage.datastore.db.VolumeDataStoreDao;
 import org.apache.cloudstack.storage.datastore.db.VolumeDataStoreVO;
 import org.apache.cloudstack.storage.heuristics.HeuristicRuleHelper;
@@ -117,6 +121,8 @@ public class AncientDataMotionStrategy implements DataMotionStrategy {
     StorageManager storageManager;
     @Inject
     SnapshotDao snapshotDao;
+    @Inject
+    SnapshotDataStoreDao snapshotDataStoreDao;
 
     @Inject
     HeuristicRuleHelper heuristicRuleHelper;
@@ -424,6 +430,32 @@ public class AncientDataMotionStrategy implements DataMotionStrategy {
         }
     }
 
+    /**
+     * Whether a KVM volume moved from one RBD pool to another has a ready snapshot with no copy on
+     * secondary storage. The move then has to keep the volume's RBD snapshots (rbd migration), or
+     * that snapshot is lost.
+     */
+    protected boolean mustKeepPrimarySnapshots(DataObject srcData, DataObject destData) {
+        if (!(srcData instanceof VolumeInfo) || !(destData instanceof VolumeInfo)) {
+            return false;
+        }
+        VolumeInfo srcVolume = (VolumeInfo) srcData;
+        if (srcVolume.getHypervisorType() != Hypervisor.HypervisorType.KVM
+                || srcVolume.getStoragePoolType() != StoragePoolType.RBD || ((VolumeInfo) destData).getStoragePoolType() != StoragePoolType.RBD) {
+            return false;
+        }
+        Map<Long, List<SnapshotDataStoreVO>> refsBySnapshot = snapshotDataStoreDao.listReadyByVolumeId(srcData.getId()).stream()
+                .collect(Collectors.groupingBy(SnapshotDataStoreVO::getSnapshotId));
+        return refsBySnapshot.values().stream().anyMatch(refs -> refs.stream().noneMatch(ref -> ref.getRole() == DataStoreRole.Image));
+    }
+
+    private static String newPath(Answer answer) {
+        if (!(answer instanceof CopyCmdAnswer) || ((CopyCmdAnswer) answer).getNewData() == null) {
+            return null;
+        }
+        return ((CopyCmdAnswer) answer).getNewData().getPath();
+    }
+
     protected Answer copyVolumeBetweenPools(DataObject srcData, DataObject destData) {
         String value = configDao.getValue(Config.CopyVolumeWait.key());
         int _copyvolumewait = NumbersUtil.parseInt(value, Integer.parseInt(Config.CopyVolumeWait.getDefaultValue()));
@@ -432,25 +464,48 @@ public class AncientDataMotionStrategy implements DataMotionStrategy {
         DataStore cacheStore = cacheMgr.getCacheStorage(destScope);
         boolean bypassSecondaryStorage = canBypassSecondaryStorage(srcData, destData);
         boolean encryptionRequired = anyVolumeRequiresEncryption(srcData, destData);
+        boolean keepPrimarySnapshots = mustKeepPrimarySnapshots(srcData, destData);
+
+        if (keepPrimarySnapshots && !bypassSecondaryStorage) {
+            String errMsg = String.format("%s has snapshots that exist only on its primary storage, they would be lost by a copy through secondary storage", srcData);
+            logger.error(errMsg);
+            return new Answer(null, false, errMsg);
+        }
+
+        // a volume whose snapshots must be kept is always copied directly, even when the zone has a cache store
+        if (bypassSecondaryStorage && (cacheStore == null || keepPrimarySnapshots)) {
+            logger.debug("Secondary storage is bypassed, copy volume between pools directly");
+            CopyCommand cmd = new CopyCommand(srcData.getTO(), destData.getTO(), _copyvolumewait, VirtualMachineManager.ExecuteInSequence.value());
+            cmd.getOptions().put(CopyCommand.VOLUME_MIGRATION, Boolean.TRUE.toString());
+            if (keepPrimarySnapshots) {
+                cmd.getOptions().put(CopyCommand.KEEP_PRIMARY_SNAPSHOTS, Boolean.TRUE.toString());
+            }
+            EndPoint ep = selector.select(srcData, destData, encryptionRequired);
+            Answer answer = null;
+            if (ep == null) {
+                String errMsg = String.format(NO_REMOTE_ENDPOINT_WITH_ENCRYPTION, encryptionRequired);
+                logger.error(errMsg);
+                answer = new Answer(cmd, false, errMsg);
+            } else {
+                answer = ep.sendMessage(cmd);
+                if (answer != null && answer.getResult()) {
+                    setClvmLockHostIdIfApplicable(destData, ep);
+                }
+            }
+            String newPath = newPath(answer);
+            if (keepPrimarySnapshots && answer != null && answer.getResult() && !Objects.equals(((VolumeInfo) srcData).getPath(), newPath)) {
+                // an agent that does not know the option copied the volume to a new image without its snapshots;
+                // fail before the source volume, and the snapshots with it, are removed
+                // the copy is left in place rather than removed: deleting an image on a guess risks the only copy of the volume
+                String errMsg = String.format("%s was copied without its snapshots by an agent that cannot keep them; the copy %s on %s is not used "
+                        + "and has to be removed by hand", srcData, newPath, destData.getDataStore().getName());
+                logger.error(errMsg);
+                answer = new Answer(cmd, false, errMsg);
+            }
+            return answer;
+        }
 
         if (cacheStore == null) {
-            if (bypassSecondaryStorage) {
-                logger.debug("Secondary storage is bypassed, copy volume between pools directly");
-                CopyCommand cmd = new CopyCommand(srcData.getTO(), destData.getTO(), _copyvolumewait, VirtualMachineManager.ExecuteInSequence.value());
-                EndPoint ep = selector.select(srcData, destData, encryptionRequired);
-                Answer answer = null;
-                if (ep == null) {
-                    String errMsg = String.format(NO_REMOTE_ENDPOINT_WITH_ENCRYPTION, encryptionRequired);
-                    logger.error(errMsg);
-                    answer = new Answer(cmd, false, errMsg);
-                } else {
-                    answer = ep.sendMessage(cmd);
-                    if (answer != null && answer.getResult()) {
-                        setClvmLockHostIdIfApplicable(destData, ep);
-                    }
-                }
-                return answer;
-            }
             // need to find a nfs or cifs image store, assuming that can't copy volume
             // directly to s3
             Long zoneId = destScope.getScopeId();
