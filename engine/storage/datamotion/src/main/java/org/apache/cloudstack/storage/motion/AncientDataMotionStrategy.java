@@ -437,6 +437,7 @@ public class AncientDataMotionStrategy implements DataMotionStrategy {
             if (bypassSecondaryStorage) {
                 logger.debug("Secondary storage is bypassed, copy volume between pools directly");
                 CopyCommand cmd = new CopyCommand(srcData.getTO(), destData.getTO(), _copyvolumewait, VirtualMachineManager.ExecuteInSequence.value());
+                cmd.getOptions().put(CopyCommand.VOLUME_MIGRATION, Boolean.TRUE.toString());
                 EndPoint ep = selector.select(srcData, destData, encryptionRequired);
                 Answer answer = null;
                 if (ep == null) {

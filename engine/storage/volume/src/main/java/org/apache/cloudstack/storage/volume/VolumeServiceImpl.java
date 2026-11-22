@@ -103,6 +103,7 @@ import com.cloud.agent.api.storage.ListVolumeAnswer;
 import com.cloud.agent.api.storage.ListVolumeCommand;
 import com.cloud.agent.api.storage.ResizeVolumeCommand;
 import com.cloud.agent.api.to.DataObjectType;
+import com.cloud.agent.api.to.DataTO;
 import com.cloud.agent.api.to.StorageFilerTO;
 import com.cloud.agent.api.to.VirtualMachineTO;
 import com.cloud.alert.AlertManager;
@@ -2000,6 +2001,7 @@ public class VolumeServiceImpl implements VolumeService {
                 destroyFuture.get();
                 future.complete(res);
             } else {
+                moveRbdSnapshotsWithMigratedVolume(srcVolume, destVolume, result.getAnswer());
                 if (copyPoliciesBetweenVolumesAndDestroySourceVolumeAfterMigration(Event.MigrationCopySucceeded, result.getAnswer(), srcVolume, destVolume, true)) {
                     future.complete(res);
                 }
@@ -2011,6 +2013,43 @@ public class VolumeServiceImpl implements VolumeService {
         }
 
         return null;
+    }
+
+    /**
+     * A volume moved by Ceph between two RBD pools ("rbd migration") keeps its image name and its RBD
+     * snapshots. Its snapshots on primary storage then follow it to the new pool, instead of being
+     * deleted along with the source volume.
+     */
+    protected void moveRbdSnapshotsWithMigratedVolume(VolumeInfo srcVolume, VolumeInfo destVolume, Answer answer) {
+        if (!(answer instanceof CopyCmdAnswer)) {
+            return;
+        }
+        DataTO newData = ((CopyCmdAnswer) answer).getNewData();
+        if (newData == null || StringUtils.isBlank(srcVolume.getPath()) || !srcVolume.getPath().equals(newData.getPath())) {
+            return;
+        }
+        StoragePoolVO srcPool = storagePoolDao.findById(srcVolume.getPoolId());
+        StoragePoolVO destPool = storagePoolDao.findById(destVolume.getPoolId());
+        if (srcPool == null || destPool == null || srcPool.getPoolType() != StoragePoolType.RBD || destPool.getPoolType() != StoragePoolType.RBD) {
+            return;
+        }
+        String srcImagePath = srcPool.getPath() + "/" + srcVolume.getPath() + "/";
+        for (SnapshotDataStoreVO snapshotStore : _snapshotStoreDao.listAllByVolumeAndDataStore(srcVolume.getId(), DataStoreRole.Primary)) {
+            if (snapshotStore.getDataStoreId() != srcPool.getId()) {
+                continue;
+            }
+            if (!StringUtils.startsWith(snapshotStore.getInstallPath(), srcImagePath)) {
+                logger.warn("Snapshot {} on primary storage has install path {}, not under {}; it is not moved with volume {}",
+                        snapshotStore.getSnapshotId(), snapshotStore.getInstallPath(), srcImagePath, srcVolume);
+                continue;
+            }
+            String snapshotName = snapshotStore.getInstallPath().substring(srcImagePath.length());
+            snapshotStore.setDataStoreId(destPool.getId());
+            snapshotStore.setVolumeId(destVolume.getId());
+            snapshotStore.setInstallPath(destPool.getPath() + "/" + srcVolume.getPath() + "/" + snapshotName);
+            _snapshotStoreDao.update(snapshotStore.getId(), snapshotStore);
+            logger.debug("Snapshot {} on primary storage moved with volume {} to pool {}", snapshotStore.getSnapshotId(), srcVolume, destPool);
+        }
     }
 
     @Override

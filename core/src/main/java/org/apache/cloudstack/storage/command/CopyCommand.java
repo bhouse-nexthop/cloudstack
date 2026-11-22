@@ -25,6 +25,11 @@ import java.util.Map;
 import com.cloud.agent.api.to.DataTO;
 
 public class CopyCommand extends StorageSubSystemCommand {
+    /**
+     * Option set when the source is removed once the copy succeeds, so the copy may consume it.
+     */
+    public static final String VOLUME_MIGRATION = "volumeMigration";
+
     private DataTO srcTO;
     private DataTO destTO;
     private DataTO cacheTO;

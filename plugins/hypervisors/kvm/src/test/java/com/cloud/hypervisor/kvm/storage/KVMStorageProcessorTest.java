@@ -26,13 +26,14 @@ import com.ceph.rbd.RbdImage;
 import com.cloud.exception.InternalErrorException;
 import com.cloud.hypervisor.kvm.resource.LibvirtComputingResource;
 import com.cloud.hypervisor.kvm.resource.LibvirtDomainXMLParser;
-import com.cloud.storage.Storage.StoragePoolType;
 import com.cloud.hypervisor.kvm.resource.LibvirtVMDef;
 import com.cloud.storage.Storage;
+import com.cloud.storage.Storage.StoragePoolType;
 import com.cloud.storage.template.TemplateConstants;
 import com.cloud.utils.Pair;
 import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.utils.script.Script;
+import org.apache.cloudstack.storage.command.CopyCommand;
 import org.apache.cloudstack.storage.to.SnapshotObjectTO;
 import org.apache.cloudstack.storage.to.VolumeObjectTO;
 import org.apache.cloudstack.utils.qemu.QemuImageOptions;
@@ -65,6 +66,7 @@ import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -794,5 +796,114 @@ public class KVMStorageProcessorTest {
         // The libvirt hot-plug apply-order bug is RBD-specific; other pool types are not gated, and the libvirt
         // version is not even consulted for them.
         storageProcessor.ensureLibvirtSupportsEncryptedRbdHotplug(StoragePoolType.NetworkFilesystem);
+    }
+
+    private KVMStoragePool mockRbdPool(String sourceDir) {
+        KVMStoragePool pool = Mockito.mock(KVMStoragePool.class);
+        Mockito.lenient().when(pool.getType()).thenReturn(StoragePoolType.RBD);
+        Mockito.lenient().when(pool.getSourceHost()).thenReturn("10.0.0.1");
+        Mockito.lenient().when(pool.getSourcePort()).thenReturn(6789);
+        Mockito.lenient().when(pool.getAuthUserName()).thenReturn("cloudstack");
+        Mockito.lenient().when(pool.getAuthSecret()).thenReturn("secret");
+        Mockito.lenient().when(pool.getSourceDir()).thenReturn(sourceDir);
+        return pool;
+    }
+
+    private CopyCommand mockCopyCommand(boolean volumeMigration) {
+        CopyCommand cmd = Mockito.mock(CopyCommand.class);
+        Map<String, String> options = new HashMap<>();
+        if (volumeMigration) {
+            options.put(CopyCommand.VOLUME_MIGRATION, "true");
+        }
+        Mockito.lenient().when(cmd.getOptions()).thenReturn(options);
+        return cmd;
+    }
+
+    @Test
+    public void canMigrateRbdImageBetweenPoolsOfTheSameCluster() {
+        Assert.assertTrue(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), volumeObjectToMock, volumeObjectToMock,
+                mockRbdPool("vm-images"), mockRbdPool("vm-images-ec")));
+    }
+
+    @Test
+    public void canMigrateRbdImageNotWhenTheCopyIsNotAMove() {
+        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(false), volumeObjectToMock, volumeObjectToMock,
+                mockRbdPool("vm-images"), mockRbdPool("vm-images-ec")));
+    }
+
+    @Test
+    public void canMigrateRbdImageNotIntoTheSameCephPool() {
+        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), volumeObjectToMock, volumeObjectToMock,
+                mockRbdPool("vm-images"), mockRbdPool("vm-images")));
+    }
+
+    @Test
+    public void canMigrateRbdImageNotToAnotherCluster() {
+        KVMStoragePool destPool = mockRbdPool("vm-images-ec");
+        Mockito.when(destPool.getSourceHost()).thenReturn("10.0.0.2");
+        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), volumeObjectToMock, volumeObjectToMock,
+                mockRbdPool("vm-images"), destPool));
+    }
+
+    @Test
+    public void canMigrateRbdImageNotForAnEncryptedVolume() {
+        Mockito.when(volumeObjectToMock.getPassphrase()).thenReturn("passphrase".getBytes());
+        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), volumeObjectToMock, volumeObjectToMock,
+                mockRbdPool("vm-images"), mockRbdPool("vm-images-ec")));
+    }
+
+    @Test
+    public void migrateRbdImageKeepsTheNameAndUsesTheDataPool() {
+        KVMStoragePool srcPool = mockRbdPool("vm-images");
+        KVMStoragePool destPool = mockRbdPool("vm-images-ec");
+        Mockito.when(destPool.getDetails()).thenReturn(Map.of(KVMPhysicalDisk.RBD_DEFAULT_DATA_POOL, "vm-images-ec-data"));
+        KVMPhysicalDisk disk = new KVMPhysicalDisk("vm-images/" + RBD_IMAGE_NAME, RBD_IMAGE_NAME, srcPool);
+        disk.setSize(1000L);
+        disk.setVirtualSize(2000L);
+        Mockito.doReturn(null).when(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.any(String[].class));
+
+        KVMPhysicalDisk newDisk = storageProcessorSpy.migrateRbdImage(disk, destPool, 1000);
+
+        Mockito.verify(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("prepare"), Mockito.eq("--flatten"),
+                Mockito.eq("--data-pool"), Mockito.eq("vm-images-ec-data"),
+                Mockito.eq("vm-images/" + RBD_IMAGE_NAME), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME));
+        Mockito.verify(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("execute"), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME), Mockito.eq("--no-progress"));
+        Mockito.verify(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("commit"), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME), Mockito.eq("--no-progress"));
+        Mockito.verify(storageProcessorSpy, Mockito.never()).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("abort"), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME), Mockito.eq("--no-progress"));
+        Assert.assertEquals(RBD_IMAGE_NAME, newDisk.getName());
+        Assert.assertEquals("vm-images-ec/" + RBD_IMAGE_NAME, newDisk.getPath());
+        Assert.assertEquals(destPool, newDisk.getPool());
+        Assert.assertEquals(1000L, newDisk.getSize());
+        Assert.assertEquals(2000L, newDisk.getVirtualSize());
+    }
+
+    @Test
+    public void migrateRbdImageAbortsWhenAStepFails() {
+        KVMStoragePool srcPool = mockRbdPool("vm-images");
+        KVMStoragePool destPool = mockRbdPool("vm-images-ec");
+        KVMPhysicalDisk disk = new KVMPhysicalDisk("vm-images/" + RBD_IMAGE_NAME, RBD_IMAGE_NAME, srcPool);
+        Mockito.doReturn(null).when(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.any(String[].class));
+        Mockito.doReturn("failed").when(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("execute"), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME), Mockito.eq("--no-progress"));
+
+        Assert.assertThrows(CloudRuntimeException.class, () -> storageProcessorSpy.migrateRbdImage(disk, destPool, 1000));
+
+        Mockito.verify(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("prepare"), Mockito.eq("--flatten"),
+                Mockito.eq("--data-pool"), Mockito.eq("vm-images-ec"),
+                Mockito.eq("vm-images/" + RBD_IMAGE_NAME), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME));
+        Mockito.verify(storageProcessorSpy, Mockito.never()).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("commit"), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME), Mockito.eq("--no-progress"));
+        Mockito.verify(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("abort"), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME), Mockito.eq("--no-progress"));
+    }
+
+    @Test
+    public void migrateRbdImageStopsAndAbortsWhenPrepareFails() {
+        KVMStoragePool srcPool = mockRbdPool("vm-images");
+        KVMStoragePool destPool = mockRbdPool("vm-images-ec");
+        KVMPhysicalDisk disk = new KVMPhysicalDisk("vm-images/" + RBD_IMAGE_NAME, RBD_IMAGE_NAME, srcPool);
+        Mockito.doReturn("failed").when(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.any(String[].class));
+
+        Assert.assertThrows(CloudRuntimeException.class, () -> storageProcessorSpy.migrateRbdImage(disk, destPool, 1000));
+
+        Mockito.verify(storageProcessorSpy, Mockito.never()).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("execute"), Mockito.anyString(), Mockito.anyString());
+        Mockito.verify(storageProcessorSpy).runRbdMigration(Mockito.eq(srcPool), Mockito.anyInt(), Mockito.eq("abort"), Mockito.eq("vm-images-ec/" + RBD_IMAGE_NAME), Mockito.eq("--no-progress"));
     }
 }

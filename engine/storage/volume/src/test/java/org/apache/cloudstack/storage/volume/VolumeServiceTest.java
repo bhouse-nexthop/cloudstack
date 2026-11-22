@@ -19,6 +19,7 @@
 
 package org.apache.cloudstack.storage.volume;
 
+import com.cloud.agent.api.Answer;
 import com.cloud.agent.api.storage.CheckAndRepairVolumeAnswer;
 import com.cloud.agent.api.storage.CheckAndRepairVolumeCommand;
 import com.cloud.agent.api.to.StorageFilerTO;
@@ -26,6 +27,7 @@ import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.exception.StorageUnavailableException;
 import com.cloud.host.HostVO;
 import com.cloud.host.dao.HostDao;
+import com.cloud.storage.DataStoreRole;
 import com.cloud.storage.CheckAndRepairVolumePayload;
 import com.cloud.storage.DiskOfferingVO;
 import com.cloud.storage.Storage;
@@ -47,7 +49,12 @@ import org.apache.cloudstack.engine.subsystem.api.storage.VolumeDataFactory;
 import org.apache.cloudstack.engine.subsystem.api.storage.VolumeInfo;
 import org.apache.cloudstack.engine.subsystem.api.storage.VolumeService;
 import org.apache.cloudstack.framework.async.AsyncCallFuture;
+import org.apache.cloudstack.storage.command.CopyCmdAnswer;
 import org.apache.cloudstack.storage.datastore.db.PrimaryDataStoreDao;
+import org.apache.cloudstack.storage.datastore.db.SnapshotDataStoreDao;
+import org.apache.cloudstack.storage.datastore.db.SnapshotDataStoreVO;
+import org.apache.cloudstack.storage.datastore.db.StoragePoolVO;
+import org.apache.cloudstack.storage.to.VolumeObjectTO;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -101,6 +108,9 @@ public class VolumeServiceTest extends TestCase{
     @Mock
     DiskOfferingDao diskOfferingDaoMock;
 
+    @Mock
+    SnapshotDataStoreDao snapshotDataStoreDaoMock;
+
     @Before
     public void setup(){
         volumeServiceImplSpy = Mockito.spy(new VolumeServiceImpl());
@@ -111,6 +121,7 @@ public class VolumeServiceTest extends TestCase{
         volumeServiceImplSpy._hostDao = hostDaoMock;
         volumeServiceImplSpy.storagePoolDao = primaryDataStoreDao;
         volumeServiceImplSpy.diskOfferingDao = diskOfferingDaoMock;
+        volumeServiceImplSpy._snapshotStoreDao = snapshotDataStoreDaoMock;
     }
 
     @Test(expected = InterruptedException.class)
@@ -358,5 +369,58 @@ public class VolumeServiceTest extends TestCase{
         Mockito.when(diskOffering.getEncrypt()).thenReturn(encryption);
         Mockito.when(diskOfferingDaoMock.findByIdIncludingRemoved(diskOfferingId)).thenReturn(diskOffering);
         Mockito.when(diskOfferingDaoMock.findById(diskOfferingId)).thenReturn(diskOffering);
+    }
+
+    private VolumeInfo mockRbdVolume(long id, long poolId, String path) {
+        VolumeInfo volume = Mockito.mock(VolumeInfo.class);
+        Mockito.lenient().when(volume.getId()).thenReturn(id);
+        Mockito.lenient().when(volume.getPoolId()).thenReturn(poolId);
+        Mockito.lenient().when(volume.getPath()).thenReturn(path);
+        Mockito.lenient().when(volume.getStoragePoolType()).thenReturn(Storage.StoragePoolType.RBD);
+        return volume;
+    }
+
+    private Answer copyAnswer(String path) {
+        VolumeObjectTO newVolume = new VolumeObjectTO();
+        newVolume.setPath(path);
+        return new CopyCmdAnswer(newVolume);
+    }
+
+    @Test
+    public void moveRbdSnapshotsWithMigratedVolumeMovesThePrimarySnapshotsToTheNewPool() {
+        VolumeInfo srcVolume = mockRbdVolume(1L, 10L, "image");
+        VolumeInfo destVolume = mockRbdVolume(2L, 20L, null);
+        StoragePoolVO srcPool = Mockito.mock(StoragePoolVO.class);
+        Mockito.when(srcPool.getId()).thenReturn(10L);
+        Mockito.when(srcPool.getPoolType()).thenReturn(Storage.StoragePoolType.RBD);
+        Mockito.when(srcPool.getPath()).thenReturn("vm-images");
+        Mockito.when(primaryDataStoreDao.findById(10L)).thenReturn(srcPool);
+        StoragePoolVO destPool = Mockito.mock(StoragePoolVO.class);
+        Mockito.when(destPool.getId()).thenReturn(20L);
+        Mockito.when(destPool.getPath()).thenReturn("vm-images-ec");
+        Mockito.when(destPool.getPoolType()).thenReturn(Storage.StoragePoolType.RBD);
+        Mockito.when(primaryDataStoreDao.findById(20L)).thenReturn(destPool);
+        SnapshotDataStoreVO onSourcePool = Mockito.spy(new SnapshotDataStoreVO(10L, 5L));
+        Mockito.doReturn(100L).when(onSourcePool).getId();
+        onSourcePool.setInstallPath("vm-images/image/snap");
+        SnapshotDataStoreVO onOtherPool = new SnapshotDataStoreVO(30L, 6L);
+        onOtherPool.setInstallPath("other/image/snap");
+        Mockito.when(snapshotDataStoreDaoMock.listAllByVolumeAndDataStore(1L, DataStoreRole.Primary)).thenReturn(Arrays.asList(onSourcePool, onOtherPool));
+
+        volumeServiceImplSpy.moveRbdSnapshotsWithMigratedVolume(srcVolume, destVolume, copyAnswer("image"));
+
+        Assert.assertEquals(20L, onSourcePool.getDataStoreId());
+        Assert.assertEquals(Long.valueOf(2L), onSourcePool.getVolumeId());
+        Assert.assertEquals("vm-images-ec/image/snap", onSourcePool.getInstallPath());
+        Mockito.verify(snapshotDataStoreDaoMock).update(100L, onSourcePool);
+        Assert.assertEquals(30L, onOtherPool.getDataStoreId());
+        Assert.assertEquals("other/image/snap", onOtherPool.getInstallPath());
+    }
+
+    @Test
+    public void moveRbdSnapshotsWithMigratedVolumeDoesNothingWhenTheImageWasCopied() {
+        volumeServiceImplSpy.moveRbdSnapshotsWithMigratedVolume(mockRbdVolume(1L, 10L, "image"), mockRbdVolume(2L, 20L, null), copyAnswer("other-image"));
+
+        Mockito.verifyNoInteractions(snapshotDataStoreDaoMock);
     }
 }
