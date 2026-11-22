@@ -36,10 +36,16 @@ else
   done
 fi
 
+if [[ $(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null) != "1" ]]; then
+  echo "net.ipv4.ip_forward is not set to 1 on the node"
+  IP_FORWARD_DISABLED=1
+fi
+
 echo ${#MISSING_PACKAGES[@]}
 if (( ${#MISSING_PACKAGES[@]} )); then
   echo "Following packages are missing in the node template: ${MISSING_PACKAGES[@]}"
   exit 1
 else
   echo 0
+  exit ${IP_FORWARD_DISABLED:-0}
 fi
