@@ -32,6 +32,7 @@ import com.cloud.kubernetes.cluster.utils.KubernetesClusterUtil;
 import com.cloud.network.IpAddress;
 import com.cloud.network.Network;
 import com.cloud.network.dao.FirewallRulesDao;
+import com.cloud.network.rules.FirewallRule;
 import com.cloud.network.rules.FirewallRuleVO;
 import com.cloud.network.rules.PortForwardingRuleVO;
 import com.cloud.service.ServiceOfferingVO;
@@ -40,6 +41,7 @@ import com.cloud.uservm.UserVm;
 import com.cloud.utils.Pair;
 import com.cloud.utils.Ternary;
 import com.cloud.utils.exception.CloudRuntimeException;
+import com.cloud.utils.net.NetUtils;
 import com.cloud.utils.ssh.SshHelper;
 import com.cloud.vm.UserVmVO;
 import org.apache.cloudstack.api.ApiCommandResourceType;
@@ -56,6 +58,7 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
@@ -239,10 +242,11 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
         return new Ternary<>(nodeIndex, additionalMemory, additionalCores);
     }
 
-    private Pair<Boolean, Integer> validateAndSetupNode(Network network, IpAddress publicIp, Account account,
+    protected Pair<Boolean, Integer> validateAndSetupNode(Network network, IpAddress publicIp, Account account,
                                    Long nodeId, int nodeIndex, String base64UserData) {
         int startSshPortNumber = KubernetesClusterActionWorker.CLUSTER_NODES_DEFAULT_START_SSH_PORT + (int) kubernetesCluster.getTotalNodeCount() - kubernetesCluster.getEtcdNodeCount().intValue();
         int sshStartPort = startSshPortNumber + nodeIndex;
+        Set<Long> preExistingRuleIds = listNodeSshRuleIds(network, publicIp, nodeId, sshStartPort);
         try {
             if (Objects.isNull(network.getVpcId())) {
                 provisionFirewallRules(publicIp, owner, sshStartPort, sshStartPort);
@@ -250,7 +254,7 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
             provisionPublicIpPortForwardingRule(publicIp, network, account, nodeId, sshStartPort, DEFAULT_SSH_PORT);
             boolean isCompatible = validateNodeCompatibility(publicIp, nodeId, sshStartPort);
             if (!isCompatible) {
-                revertNetworkRules(network, nodeId, sshStartPort);
+                revertNetworkRules(network, publicIp, nodeId, sshStartPort, preExistingRuleIds);
                 return new Pair<>(false, nodeIndex);
             }
 
@@ -268,13 +272,13 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
                  InsufficientCapacityException | IllegalAccessException e) {
             logger.error(String.format("Failed to activate API port forwarding rules for the Kubernetes cluster : %s", kubernetesCluster.getName()));
             // remove added Firewall and PF rules
-            revertNetworkRules(network, nodeId, sshStartPort);
+            revertNetworkRules(network, publicIp, nodeId, sshStartPort, preExistingRuleIds);
             return new Pair<>( false, nodeIndex);
         } catch (Exception e) {
             String errMsg = String.format("Unexpected exception while trying to add the external node %s to the Kubernetes cluster %s: %s",
                     nodeId, kubernetesCluster.getName(), e.getMessage());
             logger.error(errMsg, e);
-            revertNetworkRules(network, nodeId, sshStartPort);
+            revertNetworkRules(network, publicIp, nodeId, sshStartPort, preExistingRuleIds);
             throw new CloudRuntimeException(e);
         }
         return new Pair<>(true, ++nodeIndex);
@@ -329,17 +333,51 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
         }
     }
 
-    private void revertNetworkRules(Network network, long vmId, int port) {
-        logger.debug(String.format("Reverting network rules for VM ID %s on network %s", vmId, network.getName()));
-        FirewallRuleVO ruleVO = firewallRulesDao.findByNetworkIdAndPorts(network.getId(), port, port);
-        if (Objects.isNull(network.getVpcId())) {
-            logger.debug(String.format("Removing firewall rule %s", ruleVO.getId()));
-            firewallService.revokeIngressFirewallRule(ruleVO.getId(), true);
+    private List<FirewallRuleVO> listNodeSshRules(Network network, IpAddress publicIp, long vmId, int port) {
+        List<FirewallRuleVO> rules = new ArrayList<>();
+        for (PortForwardingRuleVO pfRule : portForwardingRulesDao.listByVm(vmId)) {
+            if (Objects.equals(pfRule.getSourceIpAddressId(), publicIp.getId()) && Objects.equals(pfRule.getSourcePortStart(), port)
+                    && pfRule.getDestinationPortStart() == DEFAULT_SSH_PORT) {
+                rules.add(pfRule);
+            }
         }
-        List<PortForwardingRuleVO> pfRules = portForwardingRulesDao.listByVm(vmId);
-        for (PortForwardingRuleVO pfRule : pfRules) {
-            logger.debug(String.format("Removing port forwarding rule %s", pfRule.getId()));
-            rulesService.revokePortForwardingRule(pfRule.getId(), true);
+        if (Objects.isNull(network.getVpcId())) {
+            rules.addAll(firewallRulesDao.listByIpPurposePortsProtocolAndNotRevoked(publicIp.getId(), port, port,
+                    NetUtils.TCP_PROTO, FirewallRule.Purpose.Firewall));
+        }
+        return rules;
+    }
+
+    protected Set<Long> listNodeSshRuleIds(Network network, IpAddress publicIp, long vmId, int port) {
+        return listNodeSshRules(network, publicIp, vmId, port).stream().map(FirewallRuleVO::getId).collect(Collectors.toSet());
+    }
+
+    /**
+     * Revokes the SSH port-forwarding and firewall rules for the node, except those in preExistingRuleIds,
+     * so that a failed add only removes what it created.
+     */
+    protected void revertNetworkRules(Network network, IpAddress publicIp, long vmId, int port, Set<Long> preExistingRuleIds) {
+        logger.debug(String.format("Reverting network rules for VM ID %s on network %s", vmId, network.getName()));
+        for (FirewallRuleVO rule : listNodeSshRules(network, publicIp, vmId, port)) {
+            if (preExistingRuleIds.contains(rule.getId())) {
+                continue;
+            }
+            String msg = String.format("Failed to remove network rule %s for VM ID %s on port %s", rule.getId(), vmId, port);
+            try {
+                boolean revoked;
+                if (rule.getPurpose() == FirewallRule.Purpose.PortForwarding) {
+                    logger.debug(String.format("Removing port forwarding rule %s", rule.getId()));
+                    revoked = rulesService.revokePortForwardingRule(rule.getId(), true);
+                } else {
+                    logger.debug(String.format("Removing firewall rule %s", rule.getId()));
+                    revoked = firewallService.revokeIngressFirewallRule(rule.getId(), true);
+                }
+                if (!revoked) {
+                    logger.warn(msg);
+                }
+            } catch (Exception e) {
+                logger.warn(msg, e);
+            }
         }
     }
 }
