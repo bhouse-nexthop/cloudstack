@@ -3470,7 +3470,8 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             KubernetesClusterCertificateExpiryAlertDays,
             KubernetesClusterCertificateAutoRenewEnabled,
             KubernetesClusterCertificateAutoRenewDays,
-            KubernetesClusterCertificateRotationTimeout
+            KubernetesClusterCertificateRotationTimeout,
+            KubernetesClusterExternalCloudProviderEnabled
         };
     }
 }
