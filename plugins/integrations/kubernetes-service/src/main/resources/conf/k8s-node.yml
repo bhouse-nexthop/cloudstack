@@ -165,7 +165,14 @@ write_files:
         echo "KUBELET_EXTRA_ARGS=--cgroup-driver=systemd{{ k8s.kubelet.cloud.provider.arg }}" > /etc/default/kubelet
 
         output=`ls ${BINARIES_DIR}/docker/`
-        if [ "$output" != "" ]; then
+        if [ "{{ registry.pull.images }}" = "true" ] && grep -qF 'registry.mirrors."*"' /etc/containerd/config.toml; then
+          echo "Skipping image import, images are pulled through the registry"
+          PAUSE_IMAGE=`kubeadm config images list --kubernetes-version "$(kubeadm version -o short)" 2>/dev/null | grep "pause" | tail -n 1`
+          if [ -n "$PAUSE_IMAGE" ]; then
+            sed -i "s|sandbox_image = .*|sandbox_image = \"$PAUSE_IMAGE\"|g" /etc/containerd/config.toml
+          fi
+          setup_complete=true
+        elif [ "$output" != "" ]; then
           present_images=""
           if [ -n "$PREBUILT_BIN_DIR" ]; then
             present_images=$(ctr -n k8s.io images ls -q 2>/dev/null | grep -xF -f <("$PREBUILT_BIN_DIR/kubeadm" config images list --kubernetes-version "v$K8S_VERSION" 2>/dev/null) || true)
@@ -299,6 +306,10 @@ write_files:
       containerd config default > /etc/containerd/config.toml
       sed  -i '/\[plugins."io.containerd.grpc.v1.cri".registry\]/a '"${registryCredentials}"'' /etc/containerd/config.toml
       sed  -i '/\[plugins."io.containerd.grpc.v1.cri".registry.mirrors\]/a '"${registryConfig}"'' /etc/containerd/config.toml
+      if [ "{{ registry.pull.images }}" = "true" ]; then
+        mirrorConfig="\\        [plugins.\"io.containerd.grpc.v1.cri\".registry.mirrors.\"*\"]\n \\         endpoint = [\"{{registry.url}}\"]"
+        sed  -i '/\[plugins."io.containerd.grpc.v1.cri".registry.mirrors\]/a '"${mirrorConfig}"'' /etc/containerd/config.toml
+      fi
 
       echo "Restarting containerd service"
       systemctl daemon-reload

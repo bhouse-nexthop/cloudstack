@@ -4323,7 +4323,8 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             KubernetesClusterCertificateRotationTimeout,
             KubernetesClusterNodeOutOfServiceTaintEnabled,
             KubernetesClusterDefaultAntiAffinityEnabled,
-            KubernetesClusterExternalCloudProviderEnabled
+            KubernetesClusterExternalCloudProviderEnabled,
+            KubernetesClusterImagesFromRegistry
         };
     }
 }
