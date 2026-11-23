@@ -1488,4 +1488,284 @@ public class KubernetesClusterRollingUpdateWorkerTest {
         Mockito.verify(manager).markMigrationApplied(CLUSTER_ID, "cluster");
         Mockito.verify(manager, Mockito.never()).markMigrationApplied(CLUSTER_ID, "node");
     }
+
+    /** A node migration of the VMs in pending, which it applies to running VMs, which are not restarted for it */
+    private KubernetesClusterMigration runningNodeMigration(Set<Long> pending) {
+        KubernetesClusterMigration migration = Mockito.mock(KubernetesClusterMigration.class);
+        Mockito.when(migration.getId()).thenReturn("running");
+        Mockito.when(migration.getScope()).thenReturn(KubernetesClusterMigration.Scope.NODE);
+        Mockito.when(migration.appliesToRunningNode()).thenReturn(true);
+        Mockito.when(migration.isPendingOnNode(Mockito.any(), Mockito.any())).thenAnswer(i -> pending.contains(((UserVmVO) i.getArgument(1)).getId()));
+        Mockito.doAnswer(i -> {
+            UserVmVO vm = i.getArgument(1);
+            Assert.assertEquals(VirtualMachine.State.Running, vmStates.get(vm.getId()));
+            pending.remove(vm.getId());
+            return calls.add("migrateRunning:" + vm.getHostName());
+        }).when(migration).applyToRunningNode(Mockito.any(), Mockito.any());
+        Mockito.doAnswer(i -> calls.add("prepare")).when(migration).applyToCluster(Mockito.any());
+        Mockito.when(migration.verify(Mockito.any(), Mockito.any())).thenAnswer(i -> pending.isEmpty());
+        return migration;
+    }
+
+    @Test
+    public void runningNodeMigrationCordonsTheNodesWithoutDrainingOrRestartingThem() {
+        addStackedControlPlane(3);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        addNode("w2", WORKER, NEW_OFFERING);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        UserVmVO c2 = vms.values().stream().filter(vm -> "c2".equals(vm.getHostName())).findFirst().get();
+        worker.setMigrations(List.of(runningNodeMigration(new HashSet<>(Set.of(c2.getId(), w1.getId())))));
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertEquals(List.of("prepare", "annotate:c2", "cordon:c2", "migrateRunning:c2", "release:c2",
+                "annotate:w1", "cordon:w1", "migrateRunning:w1", "release:w1", "event:OperationSucceeded"), calls);
+        Mockito.verify(manager).markMigrationApplied(CLUSTER_ID, "running");
+    }
+
+    @Test
+    public void runningNodeMigrationIsAppliedOnceTheNodeIsBackWhenAnotherRestartsIt() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        worker.setMigrations(List.of(nodeMigration(new HashSet<>(Set.of(w1.getId()))), runningNodeMigration(new HashSet<>(Set.of(w1.getId())))));
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertEquals(List.of("prepare", "annotate:w1", "cordon:w1", "drain:w1", "stop:w1", "migrate:w1", "start:w1", "migrateRunning:w1", "release:w1",
+                "event:OperationSucceeded"), calls);
+    }
+
+    @Test
+    public void runningNodeMigrationThatFailsUncordonsTheNode() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        KubernetesClusterMigration migration = runningNodeMigration(new HashSet<>(Set.of(w1.getId())));
+        Mockito.doThrow(new CloudRuntimeException("the provider did not initialise node w1")).when(migration).applyToRunningNode(Mockito.any(), Mockito.any());
+        worker.setMigrations(List.of(migration));
+
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class, worker::rollout);
+
+        Assert.assertTrue(e.getMessage(), e.getMessage().contains("did not initialise"));
+        Assert.assertEquals(List.of("prepare", "annotate:w1", "cordon:w1", "release:w1"), calls.subList(0, 4));
+        Assert.assertFalse(calls.contains("stop:w1"));
+        Assert.assertFalse(kube.get("w1").unschedulable);
+        Mockito.verify(manager, Mockito.never()).markMigrationApplied(Mockito.anyLong(), Mockito.anyString());
+    }
+
+    @Test
+    public void runningNodeMigrationUncordonsANodeAnEarlierRolloutLeftAnnotated() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        kube.get("w1").annotation = kube.get("w1").bootId;
+        kube.get("w1").unschedulable = true;
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        KubernetesClusterMigration migration = runningNodeMigration(new HashSet<>(Set.of(w1.getId())));
+        Mockito.doThrow(new CloudRuntimeException("failed")).when(migration).applyToRunningNode(Mockito.any(), Mockito.any());
+        worker.setMigrations(List.of(migration));
+
+        Assert.assertThrows(CloudRuntimeException.class, worker::rollout);
+
+        Assert.assertTrue(calls.toString(), calls.contains("release:w1"));
+        Assert.assertFalse(calls.contains("stop:w1"));
+        Assert.assertFalse(kube.get("w1").unschedulable);
+    }
+
+    @Test
+    public void nodeMigrationThatCanNotReadyTheClusterTouchesNoNode() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        KubernetesClusterMigration migration = runningNodeMigration(new HashSet<>(Set.of(w1.getId())));
+        Mockito.doThrow(new CloudRuntimeException("the provider is not running")).when(migration).applyToCluster(Mockito.any());
+        worker.setMigrations(List.of(migration));
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertTrue(calls.toString(), calls.stream().noneMatch(call -> call.endsWith(":w1")));
+        Mockito.verify(migration, Mockito.never()).applyToRunningNode(Mockito.any(), Mockito.any());
+        Mockito.verify(manager, Mockito.never()).markMigrationApplied(Mockito.anyLong(), Mockito.anyString());
+        Assert.assertTrue(details.contains(KubernetesClusterManagerImpl.ROLLOUT_LAST_ERROR_DETAIL));
+    }
+
+    @Test
+    public void nodeMigrationThatCanNotReadyTheClusterLeavesTheOthersToBeApplied() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        KubernetesClusterMigration refused = runningNodeMigration(new HashSet<>(Set.of(w1.getId())));
+        Mockito.doThrow(new CloudRuntimeException("the provider is not running")).when(refused).applyToCluster(Mockito.any());
+        worker.setMigrations(List.of(nodeMigration(new HashSet<>(Set.of(w1.getId()))), refused));
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertTrue(calls.toString(), calls.containsAll(List.of("stop:w1", "migrate:w1", "start:w1")));
+        Mockito.verify(refused, Mockito.never()).applyToRunningNode(Mockito.any(), Mockito.any());
+        Mockito.verify(manager).markMigrationApplied(CLUSTER_ID, "node");
+        Mockito.verify(manager, Mockito.never()).markMigrationApplied(CLUSTER_ID, "running");
+    }
+
+    @Test
+    public void runningNodeMigrationIsAppliedToASingleControlNode() {
+        UserVmVO c1 = addNode("c1", CONTROL, OLD_OFFERING);
+        addNode("w1", WORKER, NEW_OFFERING);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        worker.setMigrations(List.of(runningNodeMigration(new HashSet<>(Set.of(c1.getId())))));
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertEquals(List.of("prepare", "annotate:c1", "cordon:c1", "migrateRunning:c1", "release:c1", "event:OperationSucceeded"), calls);
+        Mockito.verify(worker, Mockito.never()).checkQuorum(Mockito.any(), Mockito.any());
+        Mockito.verify(manager).markMigrationApplied(CLUSTER_ID, "running");
+    }
+
+    @Test
+    public void nodeAnEarlierRolloutCordonedButDidNotRestartIsOnlyUncordonedInARolloutOfRunningNodeMigrations() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        addNode("w2", WORKER, NEW_OFFERING);
+        kube.get("w2").annotation = kube.get("w2").bootId;
+        kube.get("w2").unschedulable = true;
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        worker.setMigrations(List.of(runningNodeMigration(new HashSet<>(Set.of(w1.getId())))));
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertTrue(calls.toString(), calls.containsAll(List.of("release:w2", "migrateRunning:w1")));
+        Assert.assertFalse(calls.contains("stop:w1"));
+        Assert.assertFalse(calls.contains("stop:w2"));
+    }
+
+    @Test
+    public void nodeBackFromItsRestartIsUncordonedWhenARunningNodeMigrationFailsOnIt() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        KubernetesClusterMigration running = runningNodeMigration(new HashSet<>(Set.of(w1.getId())));
+        Mockito.doThrow(new CloudRuntimeException("the provider did not initialise node w1")).when(running).applyToRunningNode(Mockito.any(), Mockito.any());
+        worker.setMigrations(List.of(nodeMigration(new HashSet<>(Set.of(w1.getId()))), running));
+
+        Assert.assertThrows(CloudRuntimeException.class, worker::rollout);
+
+        Assert.assertTrue(calls.toString(), calls.containsAll(List.of("start:w1", "release:w1")));
+        Assert.assertFalse(kube.get("w1").unschedulable);
+    }
+
+    @Test
+    public void nodeAnEarlierRolloutRestartedThatIsNotBackIsRestartedAgain() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        kube.get("w1").annotation = "boot-before";
+        kube.get("w1").ready = false;
+        kube.get("w1").unschedulable = true;
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        worker.setMigrations(List.of(runningNodeMigration(new HashSet<>(Set.of(w1.getId())))));
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertTrue(calls.toString(), calls.containsAll(List.of("stop:w1", "start:w1", "migrateRunning:w1", "release:w1")));
+        Assert.assertTrue(calls.indexOf("start:w1") < calls.indexOf("migrateRunning:w1"));
+    }
+
+    @Test
+    public void nodeThatIsNotReadyIsRestartedRatherThanUpdatedInPlace() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        addNode("w2", WORKER, NEW_OFFERING);
+        kube.get("w1").ready = false;
+        KubernetesClusterRollingUpdateWorker worker = newWorker(2);
+        worker.setMigrations(List.of(runningNodeMigration(new HashSet<>(Set.of(w1.getId())))));
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertTrue(calls.toString(), calls.containsAll(List.of("stop:w1", "start:w1", "migrateRunning:w1", "release:w1")));
+        Assert.assertTrue(calls.indexOf("start:w1") < calls.indexOf("migrateRunning:w1"));
+    }
+
+    @Test
+    public void nodeBackFromAnEarlierRolloutIsUpdatedInPlace() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        // back on a new boot, but its release failed, and fails once more as the rollout starts
+        kube.get("w1").annotation = "boot-before";
+        kube.get("w1").unschedulable = true;
+        Mockito.doReturn(false).doCallRealMethod().when(worker).releaseNode(Mockito.argThat(vm -> vm != null && "w1".equals(vm.getHostName())));
+        worker.setMigrations(List.of(runningNodeMigration(new HashSet<>(Set.of(w1.getId())))));
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertTrue(calls.toString(), calls.containsAll(List.of("migrateRunning:w1", "release:w1")));
+        Assert.assertFalse(calls.contains("stop:w1"));
+    }
+
+    @Test
+    public void runningNodeMigrationIsAppliedToASingleControlNodeThatDiffersFromItsType() {
+        UserVmVO c1 = addNode("c1", CONTROL, NEW_OFFERING);
+        addNode("w1", WORKER, NEW_OFFERING);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        worker.setMigrations(List.of(runningNodeMigration(new HashSet<>(Set.of(c1.getId())))));
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertTrue(calls.toString(), calls.containsAll(List.of("migrateRunning:c1", "release:c1")));
+        Assert.assertFalse(calls.contains("stop:c1"));
+        Mockito.verify(manager).markMigrationApplied(CLUSTER_ID, "running");
+    }
+
+    @Test
+    public void nodeAnEarlierRolloutAnnotatedStaysCordonedWhenItsBatchFailsBeforeItIsSeenBack() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        UserVmVO w2 = addNode("w2", WORKER, NEW_OFFERING);
+        addNode("w3", WORKER, NEW_OFFERING);
+        kube.get("w1").annotation = kube.get("w1").bootId;
+        kube.get("w1").unschedulable = true;
+        failingDrains.add("w2");
+        KubernetesClusterRollingUpdateWorker worker = newWorker(2);
+        worker.setMigrations(List.of(nodeMigration(new HashSet<>(Set.of(w1.getId(), w2.getId())))));
+
+        Assert.assertThrows(CloudRuntimeException.class, worker::rollout);
+
+        // that rollout may have restarted it, and its kubelet not have reported its new boot yet
+        Assert.assertFalse(calls.toString(), calls.contains("stop:w1"));
+        Assert.assertFalse(calls.toString(), calls.contains("release:w1"));
+        Assert.assertTrue(kube.get("w1").unschedulable);
+    }
+
+    @Test
+    public void nodeAnInPlaceUpdateLeftCordonedIsUncordonedWithoutARestart() {
+        addNode("c1", CONTROL, NEW_OFFERING);
+        addNode("w1", WORKER, NEW_OFFERING);
+        // migrated, but its release failed
+        kube.get("c1").annotation = kube.get("c1").bootId;
+        kube.get("c1").unschedulable = true;
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        worker.setMigrations(List.of(runningNodeMigration(new HashSet<>(Set.of()))));
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertTrue(calls.toString(), calls.contains("release:c1"));
+        Assert.assertFalse(calls.toString(), calls.contains("stop:c1"));
+        Assert.assertFalse(kube.get("c1").unschedulable);
+    }
+
+    @Test
+    public void nodeBackFromAnEarlierRolloutWithNothingPendingIsOnlyUncordoned() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        addNode("w2", WORKER, NEW_OFFERING);
+        // back on a new boot, but its release failed, and fails once more as the rollout starts
+        kube.get("w2").annotation = "boot-before";
+        kube.get("w2").unschedulable = true;
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        Mockito.doReturn(false).doCallRealMethod().when(worker).releaseNode(Mockito.argThat(vm -> vm != null && "w2".equals(vm.getHostName())));
+        worker.setMigrations(List.of(runningNodeMigration(new HashSet<>(Set.of(w1.getId())))));
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertTrue(calls.toString(), calls.contains("release:w2"));
+        Assert.assertFalse(calls.toString(), calls.contains("stop:w2"));
+    }
 }

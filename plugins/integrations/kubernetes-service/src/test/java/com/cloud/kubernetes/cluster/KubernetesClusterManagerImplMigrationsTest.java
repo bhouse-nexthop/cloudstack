@@ -50,6 +50,7 @@ import com.cloud.kubernetes.cluster.dao.KubernetesClusterMigrationDao;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterVmMapDao;
 import com.cloud.kubernetes.cluster.migrations.DeleteForeverJoinTokenMigration;
 import com.cloud.kubernetes.cluster.migrations.DynamicScalingMigration;
+import com.cloud.kubernetes.cluster.migrations.ExternalCloudProviderMigration;
 import com.cloud.kubernetes.cluster.migrations.HeadlampMigration;
 import com.cloud.kubernetes.cluster.migrations.KubernetesClusterMigration;
 import com.cloud.kubernetes.cluster.migrations.KubernetesClusterMigration.Scope;
@@ -168,9 +169,9 @@ public class KubernetesClusterManagerImplMigrationsTest {
     public void registryIsInOrderWithUniqueIds() {
         List<KubernetesClusterMigration> migrations = manager.createMigrations();
 
-        Assert.assertEquals(List.of(NodeTypeSettingsMigration.ID, DynamicScalingMigration.ID, HeadlampMigration.ID, DeleteForeverJoinTokenMigration.ID),
+        Assert.assertEquals(List.of(NodeTypeSettingsMigration.ID, DynamicScalingMigration.ID, HeadlampMigration.ID, DeleteForeverJoinTokenMigration.ID, ExternalCloudProviderMigration.ID),
                 migrations.stream().map(KubernetesClusterMigration::getId).collect(Collectors.toList()));
-        Assert.assertEquals(List.of(Scope.DATABASE, Scope.NODE, Scope.CLUSTER, Scope.CLUSTER),
+        Assert.assertEquals(List.of(Scope.DATABASE, Scope.NODE, Scope.CLUSTER, Scope.CLUSTER, Scope.NODE),
                 migrations.stream().map(KubernetesClusterMigration::getScope).collect(Collectors.toList()));
         Assert.assertTrue(migrations.stream().allMatch(m -> m.getId().length() <= 64));
     }

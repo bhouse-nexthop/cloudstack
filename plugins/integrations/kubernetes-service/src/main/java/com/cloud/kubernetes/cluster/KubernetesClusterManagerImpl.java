@@ -202,6 +202,7 @@ import com.cloud.kubernetes.cluster.utils.KubernetesClusterCertificateUtil.Certi
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterAffinityGroupMapDao;
 import com.cloud.kubernetes.cluster.migrations.DeleteForeverJoinTokenMigration;
 import com.cloud.kubernetes.cluster.migrations.DynamicScalingMigration;
+import com.cloud.kubernetes.cluster.migrations.ExternalCloudProviderMigration;
 import com.cloud.kubernetes.cluster.migrations.HeadlampMigration;
 import com.cloud.kubernetes.cluster.migrations.KubernetesClusterMigration;
 import com.cloud.kubernetes.cluster.migrations.NodeTypeSettingsMigration;
@@ -3445,7 +3446,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
      */
     protected List<KubernetesClusterMigration> createMigrations() {
         return List.of(new NodeTypeSettingsMigration(this), new DynamicScalingMigration(this), new HeadlampMigration(this),
-                new DeleteForeverJoinTokenMigration(this));
+                new DeleteForeverJoinTokenMigration(this), new ExternalCloudProviderMigration(this));
     }
 
     public synchronized List<KubernetesClusterMigration> getMigrations() {

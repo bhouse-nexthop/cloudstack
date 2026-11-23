@@ -26,7 +26,7 @@ import com.cloud.vm.UserVmVO;
  * A change that brings a Kubernetes cluster created by an older version of CloudStack to what the current one sets
  * up. Each cluster records the migrations applied to it. Database migrations are applied on their own when the
  * management server starts; the others are listed as pending and applied on request, with the node ones in a single
- * rolling pass, so that each node is restarted at most once.
+ * rolling pass, so that each node is drained and restarted at most once.
  */
 public abstract class KubernetesClusterMigration {
 
@@ -35,7 +35,10 @@ public abstract class KubernetesClusterMigration {
         DATABASE,
         /** Runs kubectl on the cluster */
         CLUSTER,
-        /** Changes the VM of each node, which the rolling pass stops and starts again */
+        /**
+         * Changes each node: its VM, which the rolling pass stops and starts again, or, for one that
+         * {@link #appliesToRunningNode}, the running node, which is only cordoned
+         */
         NODE
     }
 
@@ -66,7 +69,10 @@ public abstract class KubernetesClusterMigration {
     public void applyToDatabase(KubernetesClusterVO cluster) {
     }
 
-    /** CLUSTER scope: applies the migration through the worker of the rolling pass, before it restarts any node */
+    /**
+     * CLUSTER scope: applies the migration through the worker of the rolling pass, before it restarts any node.
+     * NODE scope: readies the cluster for it, before any node is drained.
+     */
     public void applyToCluster(KubernetesClusterRollingUpdateWorker worker) {
     }
 
@@ -77,6 +83,18 @@ public abstract class KubernetesClusterMigration {
 
     /** NODE scope: migrates the stopped VM of a node, before the rolling pass starts it again */
     public void applyToStoppedNode(KubernetesCluster cluster, UserVmVO vm) {
+    }
+
+    /** NODE scope: whether it migrates a node with {@link #applyToRunningNode}, so that the rolling pass does not restart the VM for it */
+    public boolean appliesToRunningNode() {
+        return false;
+    }
+
+    /**
+     * NODE scope: migrates a node that is running and cordoned: as it is left once its VM is back, if another migration
+     * restarts it, or else neither drained nor restarted
+     */
+    public void applyToRunningNode(KubernetesClusterRollingUpdateWorker worker, UserVmVO vm) {
     }
 
     /** Whether the cluster is migrated. The worker is that of the rolling pass, or null outside of one, for a DATABASE or NODE migration */

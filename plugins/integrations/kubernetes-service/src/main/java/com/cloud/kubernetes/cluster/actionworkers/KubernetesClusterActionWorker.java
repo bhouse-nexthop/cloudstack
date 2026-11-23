@@ -175,7 +175,7 @@ public class KubernetesClusterActionWorker {
     public static final String EXTERNAL_CLOUD_PROVIDER_DETAIL = "externalCloudProvider";
     protected static final String KUBELET_CLOUD_PROVIDER_ARG_KEY = "{{ k8s.kubelet.cloud.provider.arg }}";
     // Kubelets 1.29+ leave a node without an InternalIP until the CCM sets one unless --node-ip is given
-    protected static final String KUBELET_CLOUD_PROVIDER_ARGS = " --cloud-provider=external$(ip -4 route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == \"src\") print \" --node-ip=\" $(i + 1)}')";
+    public static final String KUBELET_CLOUD_PROVIDER_ARGS = " --cloud-provider=external$(ip -4 route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == \"src\") print \" --node-ip=\" $(i + 1)}')";
 
     protected Logger logger = LogManager.getLogger(getClass());
 
@@ -454,7 +454,7 @@ public class KubernetesClusterActionWorker {
         logTransitStateAndThrow(logLevel, message, null, null, ex);
     }
 
-    protected void validateNodeUserDataLength(final String base64UserData, final KubernetesClusterNodeType nodeType) {
+    public void validateNodeUserDataLength(final String base64UserData, final KubernetesClusterNodeType nodeType) {
         int maxLength = UserDataManager.VM_USERDATA_MAX_LENGTH.value();
         if (base64UserData.length() > maxLength) {
             throw new InvalidParameterValueException(String.format("User data for %s node of Kubernetes cluster %s is %d bytes after base64 encoding, over %s (%d). Raise %s.",
@@ -939,7 +939,7 @@ public class KubernetesClusterActionWorker {
         }
     }
 
-    protected static String getNodeName(final UserVm vm) {
+    public static String getNodeName(final UserVm vm) {
         String hostName = vm.getHostName();
         return StringUtils.isNotEmpty(hostName) ? hostName.toLowerCase() : hostName;
     }

@@ -222,7 +222,7 @@ public interface KubernetesClusterService extends PluggableService, Configurable
             "Whether new Kubernetes clusters on isolated and VPC networks run their kubelets with --cloud-provider=external, so the CloudStack " +
                     "Kubernetes provider initialises the nodes. Needs a Kubernetes ISO whose provider manifest tolerates the uninitialized taint " +
                     "(v1.1.0 or later), and the provider must reach endpoint.url without cluster DNS, so use an IP address there or a provider " +
-                    "manifest with hostNetwork. Otherwise nodes stay unschedulable. Only applies when a cluster is created.",
+                    "manifest with hostNetwork. Otherwise nodes stay unschedulable. Applies when a cluster is created; an existing cluster gets it through the external-cloud-provider migration.",
             true,
             ConfigKey.Scope.Zone,
             KubernetesServiceEnabled.key());

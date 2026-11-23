@@ -64,6 +64,7 @@ import com.cloud.kubernetes.cluster.KubernetesCluster;
 import com.cloud.kubernetes.cluster.KubernetesClusterDetailsVO;
 import com.cloud.kubernetes.cluster.KubernetesClusterManagerImpl;
 import com.cloud.kubernetes.cluster.KubernetesClusterService;
+import com.cloud.kubernetes.cluster.migrations.ExternalCloudProviderMigration;
 import com.cloud.kubernetes.cluster.KubernetesClusterVO;
 import com.cloud.kubernetes.cluster.KubernetesClusterVmMapVO;
 import com.cloud.kubernetes.cluster.utils.KubeadmConfigBuilder;
@@ -876,6 +877,10 @@ public class KubernetesClusterStartWorker extends KubernetesClusterResourceModif
         }
         if (!manager.isDirectAccess(network) && KubernetesClusterService.KubernetesClusterExternalCloudProviderEnabled.valueIn(kubernetesCluster.getZoneId())) {
             kubernetesClusterDetailsDao.addDetail(kubernetesCluster.getId(), EXTERNAL_CLOUD_PROVIDER_DETAIL, "true", false);
+        }
+        // born with what the external-cloud-provider migration gives the clusters of an older version, or with no provider
+        if (manager.isDirectAccess(network) || isExternalCloudProviderEnabled()) {
+            manager.markMigrationApplied(kubernetesCluster.getId(), ExternalCloudProviderMigration.ID);
         }
         Pair<String, Integer> publicIpSshPort = new Pair<>(null, null);
         try {
