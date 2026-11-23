@@ -202,11 +202,11 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
         scaleKubernetesClusterIsolatedNetworkRules(clusterVMIds);
     }
 
-    private KubernetesClusterVO updateKubernetesClusterEntryForNodeType(final Long newWorkerSize, final KubernetesClusterNodeType nodeType,
-                                                                        final ServiceOffering newServiceOffering,
-                                                                        final boolean updateNodeOffering, boolean updateClusterOffering) throws CloudRuntimeException {
+    protected KubernetesClusterVO updateKubernetesClusterEntryForNodeType(final Long newWorkerSize, final KubernetesClusterNodeType nodeType,
+                                                                          final ServiceOffering newServiceOffering,
+                                                                          final boolean updateNodeOffering, boolean updateClusterOffering) throws CloudRuntimeException {
         final ServiceOffering serviceOffering = newServiceOffering == null ?
-                serviceOfferingDao.findById(kubernetesCluster.getServiceOfferingId()) : newServiceOffering;
+                getServiceOfferingForNodeTypeOnCluster(nodeType, kubernetesCluster) : newServiceOffering;
         final Long serviceOfferingId = newServiceOffering == null ? null : serviceOffering.getId();
 
         Pair<Long, Long> clusterCountAndCapacity = calculateNewClusterCountAndCapacity(newWorkerSize, nodeType, serviceOffering);
@@ -232,11 +232,9 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
             memory = serviceOffering.getRamSize() * totalClusterSize;
         } else {
             long nodeCount = getNodeCountForType(nodeType, kubernetesCluster);
-            Long existingOfferingId = getExistingOfferingIdForNodeType(nodeType, kubernetesCluster);
-            if (existingOfferingId == null) {
-                existingOfferingId = serviceOffering.getId();
-            }
-            ServiceOfferingVO previousOffering = serviceOfferingDao.findById(existingOfferingId);
+            // Read from the cluster, not its VMs: an offering scale has already upgraded the VMs at this point
+            ServiceOffering previousOffering = nodeCount > 0 ?
+                    getServiceOfferingForNodeTypeOnCluster(nodeType, kubernetesCluster) : serviceOffering;
             Pair<Long, Long> previousNodesCapacity = calculateNodesCapacity(previousOffering, nodeCount);
             if (WORKER == nodeType) {
                 nodeCount = newWorkerSize == null ? kubernetesCluster.getNodeCount() : newWorkerSize;
@@ -386,25 +384,25 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
         }
     }
 
-    private void validateKubernetesClusterScaleSizeParameters() throws CloudRuntimeException {
+    protected void validateKubernetesClusterScaleSizeParameters() throws CloudRuntimeException {
         final long originalClusterSize = kubernetesCluster.getNodeCount();
         if (network == null) {
             logTransitStateToFailedIfNeededAndThrow(Level.WARN, String.format("Scaling failed for Kubernetes cluster : %s, cluster network not found", kubernetesCluster.getName()));
         }
         // Check capacity and transition state
         final long newVmRequiredCount = clusterSize - originalClusterSize;
-        final ServiceOffering clusterServiceOffering = serviceOfferingDao.findById(kubernetesCluster.getServiceOfferingId());
-        if (clusterServiceOffering == null) {
-            logTransitStateToFailedIfNeededAndThrow(Level.WARN, String.format("Scaling failed for Kubernetes cluster : %s, cluster service offering not found", kubernetesCluster.getName()));
+        final ServiceOffering workerServiceOffering = getServiceOfferingForNodeTypeOnCluster(WORKER, kubernetesCluster);
+        if (workerServiceOffering == null) {
+            logTransitStateToFailedIfNeededAndThrow(Level.WARN, String.format("Scaling failed for Kubernetes cluster : %s, worker node service offering not found", kubernetesCluster.getName()));
         }
         if (newVmRequiredCount > 0) {
             final DataCenter zone = dataCenterDao.findById(kubernetesCluster.getZoneId());
             VMTemplateVO clusterTemplate = templateDao.findById(kubernetesCluster.getTemplateId());
             try {
                 if (KubernetesCluster.State.Running.equals(originalState) || KubernetesCluster.State.Alert.equals(originalState)) {
-                    plan(newVmRequiredCount, zone, clusterServiceOffering, kubernetesCluster.getDomainId(), kubernetesCluster.getAccountId(), clusterTemplate.getHypervisorType(), clusterTemplate.getArch());
+                    plan(newVmRequiredCount, zone, workerServiceOffering, kubernetesCluster.getDomainId(), kubernetesCluster.getAccountId(), clusterTemplate.getHypervisorType(), clusterTemplate.getArch());
                 } else {
-                    plan(kubernetesCluster.getTotalNodeCount() + newVmRequiredCount, zone, clusterServiceOffering, kubernetesCluster.getDomainId(), kubernetesCluster.getAccountId(), clusterTemplate.getHypervisorType(), clusterTemplate.getArch());
+                    plan(kubernetesCluster.getTotalNodeCount() + newVmRequiredCount, zone, workerServiceOffering, kubernetesCluster.getDomainId(), kubernetesCluster.getAccountId(), clusterTemplate.getHypervisorType(), clusterTemplate.getArch());
                 }
             } catch (InsufficientCapacityException e) {
                 logTransitStateToFailedIfNeededAndThrow(Level.WARN, String.format("Scaling failed for Kubernetes cluster : %s in zone : %s, insufficient capacity", kubernetesCluster.getName(), zone.getName()));
