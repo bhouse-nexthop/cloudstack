@@ -22,6 +22,9 @@ import java.util.List;
 import java.util.UUID;
 
 import org.apache.cloudstack.api.ApiConstants;
+import org.apache.cloudstack.userdata.UserDataManager;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.Level;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -31,10 +34,12 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 
+import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.kubernetes.cluster.KubernetesCluster;
 import com.cloud.kubernetes.cluster.KubernetesClusterDetailsVO;
 import com.cloud.kubernetes.cluster.KubernetesClusterManagerImpl;
 import com.cloud.kubernetes.cluster.KubernetesClusterVO;
+import com.cloud.kubernetes.cluster.KubernetesServiceHelper.KubernetesClusterNodeType;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterDao;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterDetailsDao;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterVmMapDao;
@@ -75,6 +80,8 @@ public class KubernetesClusterActionWorkerTest {
     @Mock
     PortForwardingRulesDao portForwardingRulesDao;
 
+    KubernetesCluster kubernetesCluster;
+
     KubernetesClusterActionWorker actionWorker = null;
 
     final static Long DEFAULT_ID = 1L;
@@ -85,7 +92,7 @@ public class KubernetesClusterActionWorkerTest {
         kubernetesClusterManager.kubernetesSupportedVersionDao = kubernetesSupportedVersionDao;
         kubernetesClusterManager.kubernetesClusterDetailsDao = kubernetesClusterDetailsDao;
         kubernetesClusterManager.kubernetesClusterVmMapDao = kubernetesClusterVmMapDao;
-        KubernetesCluster kubernetesCluster = Mockito.mock(KubernetesCluster.class);
+        kubernetesCluster = Mockito.mock(KubernetesCluster.class);
         Mockito.when(kubernetesCluster.getId()).thenReturn(DEFAULT_ID);
         actionWorker = new KubernetesClusterActionWorker(kubernetesCluster, kubernetesClusterManager);
         actionWorker.ipAddressDao = ipAddressDao;
@@ -463,5 +470,46 @@ public class KubernetesClusterActionWorkerTest {
     public void testIsExternalCloudProviderEnabledFalseValue() {
         mockExternalCloudProviderDetail("false");
         Assert.assertFalse(actionWorker.isExternalCloudProviderEnabled());
+    }
+
+    @Test
+    public void testValidateNodeUserDataLengthUnderLimit() {
+        actionWorker.validateNodeUserDataLength(StringUtils.repeat('a', UserDataManager.VM_USERDATA_MAX_LENGTH.value() - 1), KubernetesClusterNodeType.CONTROL);
+    }
+
+    @Test
+    public void testValidateNodeUserDataLengthAtLimit() {
+        actionWorker.validateNodeUserDataLength(StringUtils.repeat('a', UserDataManager.VM_USERDATA_MAX_LENGTH.value()), KubernetesClusterNodeType.WORKER);
+    }
+
+    @Test
+    public void testValidateNodeUserDataLengthOverLimit() {
+        Mockito.when(kubernetesCluster.getName()).thenReturn("test-cluster");
+        int limit = UserDataManager.VM_USERDATA_MAX_LENGTH.value();
+        InvalidParameterValueException e = Assert.assertThrows(InvalidParameterValueException.class, () ->
+                actionWorker.validateNodeUserDataLength(StringUtils.repeat('a', limit + 1), KubernetesClusterNodeType.ETCD));
+        Assert.assertEquals(String.format("User data for etcd node of Kubernetes cluster test-cluster is %d bytes after base64 encoding, over vm.userdata.max.length (%d). Raise vm.userdata.max.length.",
+                limit + 1, limit), e.getMessage());
+    }
+
+    @Test
+    public void testLogTransitStateAndThrowKeepsInvalidParameterMessage() {
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class, () ->
+                actionWorker.logTransitStateAndThrow(Level.ERROR, "Provisioning failed", null, null, new InvalidParameterValueException("User data is too big")));
+        Assert.assertEquals("Provisioning failed: User data is too big", e.getMessage());
+    }
+
+    @Test
+    public void testLogTransitStateAndThrowDropsOtherCauseMessage() {
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class, () ->
+                actionWorker.logTransitStateAndThrow(Level.ERROR, "Provisioning failed", null, null, new CloudRuntimeException("internal detail")));
+        Assert.assertEquals("Provisioning failed", e.getMessage());
+    }
+
+    @Test
+    public void testLogTransitStateAndThrowDoesNotRepeatCauseMessage() {
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class, () ->
+                actionWorker.logTransitStateAndThrow(Level.ERROR, "Scaling failed due to bad offering", null, null, new InvalidParameterValueException("bad offering")));
+        Assert.assertEquals("Scaling failed due to bad offering", e.getMessage());
     }
 }
