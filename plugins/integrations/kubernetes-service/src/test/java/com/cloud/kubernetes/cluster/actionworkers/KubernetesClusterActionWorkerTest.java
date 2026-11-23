@@ -60,6 +60,7 @@ import com.cloud.network.rules.dao.PortForwardingRulesDao;
 import com.cloud.uservm.UserVm;
 import com.cloud.utils.Pair;
 import com.cloud.utils.net.Ip;
+import com.cloud.vm.UserVmVO;
 
 @RunWith(MockitoJUnitRunner.class)
 public class KubernetesClusterActionWorkerTest {
@@ -537,5 +538,27 @@ public class KubernetesClusterActionWorkerTest {
         String config = worker.getKubernetesNodeConfig("10.1.1.1", false, false);
         Assert.assertTrue(config.contains("K8S_VERSION=\"1.33.1\""));
         Assert.assertFalse(config.contains("{{ k8s.version }}"));
+    }
+
+    @Test
+    public void testGetKubernetesNodeNameLowercasesHostName() {
+        UserVmVO vm = Mockito.mock(UserVmVO.class);
+        Mockito.when(vm.getHostName()).thenReturn("External-Node-1");
+        Assert.assertEquals("external-node-1", actionWorker.getKubernetesNodeName(vm));
+        Mockito.verify(vm, Mockito.never()).getDisplayName();
+    }
+
+    @Test
+    public void testGetKubernetesNodeNameBlankHostName() {
+        for (String hostName : new String[] {null, "", " "}) {
+            UserVmVO vm = Mockito.mock(UserVmVO.class);
+            Mockito.when(vm.getHostName()).thenReturn(hostName);
+            Assert.assertNull("hostName=" + hostName, actionWorker.getKubernetesNodeName(vm));
+        }
+    }
+
+    @Test
+    public void testGetKubernetesNodeNameNullVm() {
+        Assert.assertNull(actionWorker.getKubernetesNodeName(null));
     }
 }
