@@ -1173,6 +1173,15 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
         return parseNodeStatuses(output);
     }
 
+    /** The names of the Kubernetes nodes of the cluster that have not registered, as one that has not joined yet */
+    public List<String> getUnregisteredNodes() {
+        Map<String, NodeStatus> statuses = getNodeStatuses();
+        return getKubernetesClusterVMMaps().stream()
+                .filter(vmMap -> !vmMap.isExternalNode() && KubernetesClusterUtil.getNodeType(vmMap) != ETCD)
+                .map(vmMap -> userVmDao.findById(vmMap.getVmId())).filter(Objects::nonNull)
+                .map(KubernetesClusterActionWorker::getNodeName).filter(name -> !statuses.containsKey(name)).collect(Collectors.toList());
+    }
+
     /** The node statuses, or none while the Kubernetes API can not be reached, as while a control node restarts */
     protected Map<String, NodeStatus> getNodeStatusesOrEmpty() {
         try {

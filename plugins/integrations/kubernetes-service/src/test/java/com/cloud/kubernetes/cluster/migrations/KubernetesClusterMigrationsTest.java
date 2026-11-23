@@ -312,4 +312,101 @@ public class KubernetesClusterMigrationsTest {
         Assert.assertFalse(migration.verify(cluster, worker));
         Assert.assertFalse(migration.verify(cluster, null));
     }
+
+    // the bootstrap token derived from the cluster UUID
+
+    private static final String UUID = "0123abcd-4567-89ef-0123-456789abcdef";
+    private static final String TOKEN_SECRET_COMMAND = String.format(DeleteForeverJoinTokenMigration.TOKEN_SECRET_COMMAND, "0123ab");
+    private static final String DELETE_TOKEN_COMMAND = String.format(DeleteForeverJoinTokenMigration.DELETE_TOKEN_COMMAND, "0123ab");
+
+    private static String tokenSecretOutput(String secret) {
+        return "sudo: unable to resolve host x\nsecret=" + org.apache.commons.codec.binary.Base64.encodeBase64String(secret.getBytes()) + ".";
+    }
+
+    private void withUuidToken() {
+        Mockito.when(cluster.getUuid()).thenReturn(UUID);
+        Mockito.when(worker.getKubernetesCluster()).thenReturn(cluster);
+    }
+
+    @Test
+    public void uuidTokenIsTheOneOlderVersionsGaveTheCluster() {
+        Mockito.when(cluster.getUuid()).thenReturn(UUID);
+
+        Assert.assertArrayEquals(new String[] {"0123ab", "cd456789ef012345"}, DeleteForeverJoinTokenMigration.getUuidToken(cluster));
+    }
+
+    @Test
+    public void uuidTokenIsDeletedWhenItsSecretMatches() {
+        withUuidToken();
+        Mockito.when(worker.runKubectl(TOKEN_SECRET_COMMAND)).thenReturn(tokenSecretOutput("cd456789ef012345"));
+        Mockito.when(worker.runKubectl(DELETE_TOKEN_COMMAND)).thenReturn("secret \"bootstrap-token-0123ab\" deleted");
+
+        new DeleteForeverJoinTokenMigration(manager).applyToCluster(worker);
+
+        Mockito.verify(worker).runKubectl(DELETE_TOKEN_COMMAND);
+    }
+
+    @Test
+    public void uuidTokenIsKeptWhileANodeHasNotRegistered() {
+        withUuidToken();
+        Mockito.when(worker.runKubectl(TOKEN_SECRET_COMMAND)).thenReturn(tokenSecretOutput("cd456789ef012345"));
+        Mockito.when(worker.getUnregisteredNodes()).thenReturn(List.of("w2"));
+
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class, () -> new DeleteForeverJoinTokenMigration(manager).applyToCluster(worker));
+
+        Assert.assertTrue(e.getMessage(), e.getMessage().contains("w2"));
+        Mockito.verify(worker, Mockito.never()).runKubectl(DELETE_TOKEN_COMMAND);
+    }
+
+    @Test
+    public void tokenOfTheSameIdWithAnotherSecretIsLeftAlone() {
+        withUuidToken();
+        DeleteForeverJoinTokenMigration migration = new DeleteForeverJoinTokenMigration(manager);
+        Mockito.when(worker.runKubectl(TOKEN_SECRET_COMMAND)).thenReturn(tokenSecretOutput("0000000000000000"));
+
+        migration.applyToCluster(worker);
+
+        Mockito.verify(worker, Mockito.never()).runKubectl(DELETE_TOKEN_COMMAND);
+        Assert.assertTrue(migration.verify(cluster, worker));
+    }
+
+    @Test
+    public void uuidTokenMigrationHasNothingToDoOnceTheTokenIsGone() {
+        withUuidToken();
+        DeleteForeverJoinTokenMigration migration = new DeleteForeverJoinTokenMigration(manager);
+        Mockito.when(worker.runKubectl(TOKEN_SECRET_COMMAND)).thenReturn("sudo: unable to resolve host x\n");
+
+        migration.applyToCluster(worker);
+        migration.applyToCluster(worker);
+
+        Mockito.verify(worker, Mockito.never()).runKubectl(DELETE_TOKEN_COMMAND);
+        Assert.assertTrue(migration.verify(cluster, worker));
+        Assert.assertNull(migration.checkPrecondition(cluster));
+    }
+
+    @Test
+    public void uuidTokenMigrationFailsWhenKubectlDoes() {
+        withUuidToken();
+        DeleteForeverJoinTokenMigration migration = new DeleteForeverJoinTokenMigration(manager);
+        Mockito.when(worker.runKubectl(TOKEN_SECRET_COMMAND)).thenReturn(null);
+
+        Assert.assertThrows(CloudRuntimeException.class, () -> migration.applyToCluster(worker));
+        Assert.assertFalse(migration.verify(cluster, worker));
+
+        Mockito.when(worker.runKubectl(TOKEN_SECRET_COMMAND)).thenReturn(tokenSecretOutput("cd456789ef012345"));
+        Mockito.when(worker.runKubectl(DELETE_TOKEN_COMMAND)).thenReturn(null);
+        Assert.assertThrows(CloudRuntimeException.class, () -> migration.applyToCluster(worker));
+    }
+
+    @Test
+    public void uuidTokenMigrationVerifiesOnlyOnTheCluster() {
+        withUuidToken();
+        DeleteForeverJoinTokenMigration migration = new DeleteForeverJoinTokenMigration(manager);
+        Mockito.when(worker.runKubectl(TOKEN_SECRET_COMMAND)).thenReturn(tokenSecretOutput("cd456789ef012345"));
+
+        Assert.assertFalse(migration.verify(cluster, worker));
+        Assert.assertFalse(migration.verify(cluster, null));
+        Assert.assertEquals(KubernetesClusterMigration.Scope.CLUSTER, migration.getScope());
+        Assert.assertFalse(migration.isDisruptive());
+    }
 }

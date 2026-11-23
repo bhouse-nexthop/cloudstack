@@ -200,6 +200,7 @@ import com.cloud.kubernetes.cluster.utils.KubernetesClusterCertificateUtil;
 import com.cloud.kubernetes.cluster.utils.KubernetesClusterCertificateUtil.CertificateExpiry;
 import com.cloud.kubernetes.cluster.utils.KubernetesClusterCertificateUtil.CertificateExpiryReport;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterAffinityGroupMapDao;
+import com.cloud.kubernetes.cluster.migrations.DeleteForeverJoinTokenMigration;
 import com.cloud.kubernetes.cluster.migrations.DynamicScalingMigration;
 import com.cloud.kubernetes.cluster.migrations.HeadlampMigration;
 import com.cloud.kubernetes.cluster.migrations.KubernetesClusterMigration;
@@ -2130,6 +2131,8 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
                 if (hasNodeTypeServiceOfferings(newCluster)) {
                     markMigrationApplied(newCluster.getId(), NodeTypeSettingsMigration.ID);
                 }
+                // nodes join with a token created for them
+                markMigrationApplied(newCluster.getId(), DeleteForeverJoinTokenMigration.ID);
                 persistAffinityGroupMappings(newCluster.getId(),
                         addDefaultAntiAffinityGroups(newCluster, owner, nodeTypeCount, affinityGroupNodeTypeMap));
                 addKubernetesClusterDetails(newCluster, defaultNetwork, cmd);
@@ -3441,7 +3444,8 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
      * that needs code that is not there yet is added with that code.
      */
     protected List<KubernetesClusterMigration> createMigrations() {
-        return List.of(new NodeTypeSettingsMigration(this), new DynamicScalingMigration(this), new HeadlampMigration(this));
+        return List.of(new NodeTypeSettingsMigration(this), new DynamicScalingMigration(this), new HeadlampMigration(this),
+                new DeleteForeverJoinTokenMigration(this));
     }
 
     public synchronized List<KubernetesClusterMigration> getMigrations() {
