@@ -846,7 +846,13 @@ public class KubernetesClusterScaleWorkerTest {
         KubernetesClusterVmMapVO workerMap = mockNodeVmMap(102L, 202L, "node-2");
         Mockito.when(userVmManager.expunge(Mockito.any())).thenReturn(true);
         // Not a CloudRuntimeException, after every node has been removed
-        Mockito.when(clusterManager.isDirectAccess(Mockito.any())).thenThrow(new IllegalStateException("network gone"));
+        Network isolatedNetwork = Mockito.mock(Network.class);
+        Mockito.when(isolatedNetwork.getVpcId()).thenReturn(null);
+        ReflectionTestUtils.setField(spy, "network", isolatedNetwork);
+        com.cloud.network.IpAddress sshIp = Mockito.mock(com.cloud.network.IpAddress.class);
+        Mockito.doReturn(sshIp).when(spy).getNodeSshIp();
+        Mockito.doReturn(Collections.emptyList()).when(spy).listNodeSshPortForwardingRules(Mockito.eq(sshIp), Mockito.anyLong());
+        Mockito.doThrow(new IllegalStateException("network gone")).when(spy).shrinkNodeSshFirewallRule(sshIp);
 
         Assert.assertThrows(IllegalStateException.class, () -> spy.removeNodesFromCluster(Arrays.asList(controlMap, workerMap)));
 
