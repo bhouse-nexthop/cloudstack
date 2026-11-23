@@ -109,16 +109,16 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
             Ternary<Integer, Long, Long> nodesAddedAndMemory = importNodeToCluster(nodeIds, network, publicIp, base64UserData);
             int nodesAdded = nodesAddedAndMemory.first();
             updateKubernetesCluster(kubernetesCluster.getId(), nodesAddedAndMemory, manualUpgrade);
-            if (nodeIds.size() != nodesAdded) {
-                String msg = String.format("Not every node was added to the CKS cluster %s, nodes added: %s out of %s", kubernetesCluster.getUuid(), nodesAdded, nodeIds.size());
-                logger.info(msg);
-                detachCksIsoFromNodesAddedToCluster(nodeIds, kubernetesCluster.getId(), mountCksIsoOnVr);
-                stateTransitTo(kubernetesCluster.getId(), KubernetesCluster.Event.OperationFailed);
-                deleteUnusedJoinToken();
-                ActionEventUtils.onCompletedActionEvent(CallContext.current().getCallingUserId(), CallContext.current().getCallingAccountId(),
-                        EventVO.LEVEL_ERROR, KubernetesClusterEventTypes.EVENT_KUBERNETES_CLUSTER_NODES_ADD,
-                        msg, kubernetesCluster.getId(), ApiCommandResourceType.KubernetesCluster.toString(), 0);
-                return false;
+            List<Long> failedNodeIds = nodeIds.stream().filter(nodeId -> !finalNodeIds.contains(nodeId)).collect(Collectors.toList());
+            if (!failedNodeIds.isEmpty()) {
+                String msg = getNodesNotAddedMessage(nodeIds.size(), failedNodeIds);
+                recordNodesAdditionFailure(msg);
+                try {
+                    detachCksIsoFromNodesAddedToCluster(nodeIds, kubernetesCluster.getId(), mountCksIsoOnVr);
+                } catch (Exception e) {
+                    logger.error(String.format("Failed to detach the CKS ISO after failing to add nodes to Kubernetes cluster %s", kubernetesCluster.getName()), e);
+                }
+                throw new CloudRuntimeException(msg);
             }
             Pair<String, Integer> publicIpSshPort = getKubernetesClusterServerIpSshPort(null);
             KubernetesClusterUtil.validateKubernetesClusterReadyNodesCount(kubernetesCluster, publicIpSshPort.first(), publicIpSshPort.second(),
@@ -150,6 +150,29 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
         if (finalNodeIds.isEmpty()) {
             deleteJoinToken();
         }
+    }
+
+    protected String describeNodes(List<Long> nodeIds) {
+        if (nodeIds.isEmpty()) {
+            return "none";
+        }
+        return nodeIds.stream().map(nodeId -> {
+            UserVmVO vm = userVmDao.findByIdIncludingRemoved(nodeId);
+            return Objects.isNull(vm) ? String.valueOf(nodeId) : String.format("%s (%s)", vm.getName(), vm.getUuid());
+        }).collect(Collectors.joining(", "));
+    }
+
+    protected String getNodesNotAddedMessage(int requestedNodes, List<Long> failedNodeIds) {
+        return String.format("Failed to add %d of %d nodes to Kubernetes cluster %s (%s). Not added: %s. Added: %s",
+                failedNodeIds.size(), requestedNodes, kubernetesCluster.getName(), kubernetesCluster.getUuid(),
+                describeNodes(failedNodeIds), describeNodes(finalNodeIds));
+    }
+
+    protected void recordNodesAdditionFailure(String msg) {
+        logger.error(msg);
+        ActionEventUtils.onCompletedActionEvent(CallContext.current().getCallingUserId(), CallContext.current().getCallingAccountId(),
+                EventVO.LEVEL_ERROR, KubernetesClusterEventTypes.EVENT_KUBERNETES_CLUSTER_NODES_ADD,
+                msg, kubernetesCluster.getId(), ApiCommandResourceType.KubernetesCluster.toString(), 0);
     }
 
     private void detachCksIsoFromNodesAddedToCluster(List<Long> nodeIds, long kubernetesClusterId, boolean mountCksIsoOnVr) {
