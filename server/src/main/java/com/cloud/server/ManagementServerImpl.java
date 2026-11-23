@@ -673,6 +673,7 @@ import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections.MapUtils;
 import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
 
 import com.cloud.agent.AgentManager;
 import com.cloud.agent.api.Answer;
@@ -768,6 +769,7 @@ import com.cloud.hypervisor.HypervisorGuru;
 import com.cloud.hypervisor.dao.HypervisorCapabilitiesDao;
 import com.cloud.hypervisor.kvm.dpdk.DpdkHelper;
 import com.cloud.info.ConsoleProxyInfo;
+import com.cloud.kubernetes.cluster.KubernetesServiceHelper;
 import com.cloud.network.IpAddress;
 import com.cloud.network.IpAddressManager;
 import com.cloud.network.IpAddressManagerImpl;
@@ -843,6 +845,7 @@ import com.cloud.utils.NumbersUtil;
 import com.cloud.utils.Pair;
 import com.cloud.utils.PasswordGenerator;
 import com.cloud.utils.Ternary;
+import com.cloud.utils.component.ComponentContext;
 import com.cloud.utils.component.ComponentLifecycle;
 import com.cloud.utils.concurrency.NamedThreadFactory;
 import com.cloud.utils.crypt.DBEncryptionUtil;
@@ -5296,6 +5299,8 @@ public class ManagementServerImpl extends MutualExclusiveIdsManagerBase implemen
             throw new CloudRuntimeException(String.format("Userdata %s cannot be removed as it is linked to active template/templates", userData.getName()));
         }
 
+        checkUserDataNotUsedByKubernetesClusters(userData);
+
         List<UserVmVO> userVMsHavingUserdata = _userVmDao.findByUserDataId(userData.getId());
         if (CollectionUtils.isNotEmpty(userVMsHavingUserdata)) {
             throw new CloudRuntimeException(String.format("Userdata %s cannot be removed as it is being used by some instances", userData.getName()));
@@ -5304,6 +5309,17 @@ public class ManagementServerImpl extends MutualExclusiveIdsManagerBase implemen
         annotationDao.removeByEntityType(AnnotationService.EntityType.USER_DATA.name(), userData.getUuid());
 
         return userDataDao.remove(userData.getId());
+    }
+
+    protected void checkUserDataNotUsedByKubernetesClusters(UserData userData) {
+        KubernetesServiceHelper kubernetesServiceHelper;
+        try {
+            kubernetesServiceHelper = ComponentContext.getDelegateComponentOfType(KubernetesServiceHelper.class);
+        } catch (NoSuchBeanDefinitionException ignored) {
+            logger.debug("No KubernetesServiceHelper bean found");
+            return;
+        }
+        kubernetesServiceHelper.checkUserDataCanBeDeleted(userData);
     }
 
     @Override
