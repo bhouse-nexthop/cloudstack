@@ -73,9 +73,10 @@ public final class KubeadmConfigBuilder {
             "advertise-address", "bind-address", "secure-port", "authorization-mode", "service-cluster-ip-range", "client-ca-file",
             "tls-cert-file", "tls-private-key-file", "etcd-servers", "etcd-cafile", "etcd-certfile", "etcd-keyfile",
             "kubelet-client-certificate", "kubelet-client-key", "service-account-key-file", "service-account-signing-key-file",
-            "anonymous-auth", "enable-bootstrap-token-auth", "allow-privileged");
+            "anonymous-auth", "enable-bootstrap-token-auth", "allow-privileged", "disable-admission-plugins", "admission-control");
     private static final Set<String> MANAGED_KUBELET_FIELDS = Set.of("apiVersion", "kind",
-            "authentication", "authorization", "cgroupDriver", "clusterDNS", "clusterDomain", "staticPodPath");
+            "authentication", "authorization", "cgroupDriver", "clusterDNS", "clusterDomain", "staticPodPath",
+            "staticPodURL", "providerID", "containerRuntimeEndpoint");
     private static final Map<String, String> AUDIT_LOG_DEFAULTS = Map.of(
             "audit-log-maxage", "30",
             "audit-log-maxbackup", "3",
@@ -95,7 +96,7 @@ public final class KubeadmConfigBuilder {
             if (name == null || !ARG_NAME.matcher(name).matches()) {
                 throw new InvalidParameterValueException(String.format("Invalid kube-apiserver argument name: %s. Use the flag name without the leading dashes", name));
             }
-            if (MANAGED_API_SERVER_ARGS.contains(name)) {
+            if (MANAGED_API_SERVER_ARGS.contains(name) || name.startsWith("requestheader-")) {
                 throw new InvalidParameterValueException(String.format("kube-apiserver argument %s is managed by CloudStack", name));
             }
             if (!isSafeValue(arg.getValue())) {
@@ -194,6 +195,10 @@ public final class KubeadmConfigBuilder {
         }
         if (MapUtils.isNotEmpty(apiServerArgs)) {
             extraArgs.putAll(new TreeMap<>(apiServerArgs));
+            String admissionPlugins = extraArgs.get("enable-admission-plugins");
+            if (admissionPlugins != null && !List.of(admissionPlugins.split(",")).contains("NodeRestriction")) {
+                extraArgs.put("enable-admission-plugins", admissionPlugins.isEmpty() ? "NodeRestriction" : admissionPlugins + ",NodeRestriction");
+            }
         }
         if (!extraArgs.isEmpty()) {
             apiServer.put("extraArgs", v1beta4 ? toArgList(extraArgs) : extraArgs);
@@ -267,6 +272,8 @@ public final class KubeadmConfigBuilder {
             if (primitive.isString() && !isSafeValue(primitive.getAsString())) {
                 throw new InvalidParameterValueException(String.format("Invalid kubelet configuration value: %s, allowed characters are letters, digits and ._:/%%+=,@~*-", primitive.getAsString()));
             }
+        } else if (element.isJsonNull()) {
+            throw new InvalidParameterValueException("Kubelet configuration values can not be null, leave the field out instead");
         }
     }
 

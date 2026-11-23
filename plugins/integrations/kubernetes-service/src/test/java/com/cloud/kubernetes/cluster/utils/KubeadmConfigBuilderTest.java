@@ -135,6 +135,19 @@ public class KubeadmConfigBuilderTest {
     }
 
     @Test(expected = InvalidParameterValueException.class)
+    public void apiServerArgRequestHeader() {
+        KubeadmConfigBuilder.validateApiServerArgs(Map.of("requestheader-allowed-names", "foo"));
+    }
+
+    @Test
+    public void buildKeepsNodeRestriction() {
+        List<JsonObject> docs = parse(KubeadmConfigBuilder.build("1.30.2", "10.1.1.10", 6443, Collections.emptyList(),
+                "abcdef.0123456789abcdef", "0", "key", false, Map.of("enable-admission-plugins", "PodNodeSelector"), false, null));
+        Assert.assertEquals("PodNodeSelector,NodeRestriction",
+                docs.get(0).getAsJsonObject("apiServer").getAsJsonObject("extraArgs").get("enable-admission-plugins").getAsString());
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
     public void apiServerArgNeededToJoin() {
         KubeadmConfigBuilder.validateApiServerArgs(Map.of("anonymous-auth", "false"));
     }
@@ -180,6 +193,11 @@ public class KubeadmConfigBuilderTest {
                 Assert.assertTrue(e.getMessage().startsWith("Kubelet configuration must be a JSON object"));
             }
         }
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
+    public void kubeletConfigNullValue() {
+        KubeadmConfigBuilder.normalizeKubeletConfig("{\"evictionHard\": {\"memory.available\": null}}");
     }
 
     @Test(expected = InvalidParameterValueException.class)
