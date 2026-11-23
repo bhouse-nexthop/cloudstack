@@ -258,6 +258,31 @@ public class KubernetesClusterManagerImplMigrationsTest {
     }
 
     @Test
+    public void aNewClusterGetsTheClusterOfferingForItsNodeTypesWithoutOne() {
+        cluster.setEtcdNodeCount(1L);
+        cluster.setWorkerNodeServiceOfferingId(8L);
+
+        Assert.assertEquals(List.of(KubernetesClusterNodeType.CONTROL, KubernetesClusterNodeType.ETCD), manager.copyServiceOfferingToNodeTypes(cluster));
+
+        Assert.assertEquals(CLUSTER_OFFERING, (long) cluster.getControlNodeServiceOfferingId());
+        Assert.assertEquals(8L, (long) cluster.getWorkerNodeServiceOfferingId());
+        Assert.assertEquals(CLUSTER_OFFERING, (long) cluster.getEtcdNodeServiceOfferingId());
+        Assert.assertTrue(manager.hasNodeTypeServiceOfferings(cluster));
+        Assert.assertTrue(new NodeTypeSettingsMigration(manager).verify(cluster, null));
+    }
+
+    @Test
+    public void aNewClusterWithNoClusterOfferingKeepsItsNodeTypesAsGiven() {
+        Mockito.doReturn(null).when(cluster).getServiceOfferingId();
+        cluster.setControlNodeServiceOfferingId(7L);
+
+        Assert.assertTrue(manager.copyServiceOfferingToNodeTypes(cluster).isEmpty());
+
+        Assert.assertNull(cluster.getWorkerNodeServiceOfferingId());
+        Assert.assertFalse(manager.hasNodeTypeServiceOfferings(cluster));
+    }
+
+    @Test
     public void runnerSkipsWhileAnotherManagementServerHoldsTheLock() {
         GlobalLock lock = Mockito.mock(GlobalLock.class);
         Mockito.when(lock.lock(Mockito.anyInt())).thenReturn(false);

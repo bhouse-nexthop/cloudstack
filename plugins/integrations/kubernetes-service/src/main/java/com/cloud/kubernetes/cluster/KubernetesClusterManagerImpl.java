@@ -1892,7 +1892,12 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
                     newCluster.setSecurityGroupId(finalSecurityGroup.getId());
                 }
                 newCluster.setCsiEnabled(cmd.getEnableCsi());
+                // born with what the node-type-settings migration gives the clusters of an older version
+                copyServiceOfferingToNodeTypes(newCluster);
                 kubernetesClusterDao.persist(newCluster);
+                if (hasNodeTypeServiceOfferings(newCluster)) {
+                    markMigrationApplied(newCluster.getId(), NodeTypeSettingsMigration.ID);
+                }
                 persistAffinityGroupMappings(newCluster.getId(), affinityGroupNodeTypeMap);
                 addKubernetesClusterDetails(newCluster, defaultNetwork, cmd);
                 return newCluster;
@@ -2589,10 +2594,16 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
                     }
                     Set<KubernetesClusterNodeType> unrollable = worker == null ? Set.of() : getUnrollableNodeTypes(cluster);
                     Set<Long> outOfDateBefore = unrollable.isEmpty() ? Set.of() : getOutOfDateNodeIds(cluster, unrollable);
-                    convertToNodeTypeSettings(cluster);
+                    boolean converted = kubernetesClusterMigrationDao.findByClusterIdAndMigrationId(cluster.getId(), NodeTypeSettingsMigration.ID) != null;
+                    if (!converted) {
+                        convertToNodeTypeSettings(cluster);
+                    }
                     // the templates are checked against the node types as another update may have left them
                     checkNodeTemplates(cluster, cmd.getTemplateNodeTypeMap(), kubernetesClusterVmMapDao.listByClusterId(cluster.getId()));
                     storeNodeTypeSettings(cluster, cmd);
+                    if (!converted && hasNodeTypeServiceOfferings(cluster)) {
+                        markMigrationApplied(cluster.getId(), NodeTypeSettingsMigration.ID);
+                    }
                     if (!unrollable.isEmpty()) {
                         checkUnrollableNodeTypes(cluster, unrollable, outOfDateBefore);
                     }
@@ -2982,12 +2993,10 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
      * types that have their settings already.
      */
     public void convertToNodeTypeSettings(KubernetesClusterVO cluster) {
-        boolean hasEtcdNodes = cluster.getEtcdNodeCount() != null && cluster.getEtcdNodeCount() > 0;
-        for (KubernetesClusterNodeType nodeType : hasEtcdNodes ? List.of(CONTROL, WORKER, ETCD) : List.of(CONTROL, WORKER)) {
-            if (getNodeTypeServiceOfferingIdIfSet(cluster, nodeType) == null) {
-                setNodeTypeServiceOfferingId(cluster, nodeType, cluster.getServiceOfferingId());
-                logger.info("Copied the service offering of Kubernetes cluster {} to its {} nodes", cluster, nodeType.name().toLowerCase());
-            }
+        for (KubernetesClusterNodeType nodeType : copyServiceOfferingToNodeTypes(cluster)) {
+            logger.info("Copied the service offering of Kubernetes cluster {} to its {} nodes", cluster, nodeType.name().toLowerCase());
+        }
+        for (KubernetesClusterNodeType nodeType : getNodeTypes(cluster)) {
             if (CollectionUtils.isNotEmpty(getNodeTypeAffinityGroupIds(cluster.getId(), nodeType))) {
                 continue;
             }
@@ -3009,6 +3018,28 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             }
         }
         kubernetesClusterDao.update(cluster.getId(), cluster);
+    }
+
+    protected List<KubernetesClusterNodeType> getNodeTypes(KubernetesCluster cluster) {
+        boolean hasEtcdNodes = cluster.getEtcdNodeCount() != null && cluster.getEtcdNodeCount() > 0;
+        return hasEtcdNodes ? List.of(CONTROL, WORKER, ETCD) : List.of(CONTROL, WORKER);
+    }
+
+    /** Gives the node types with no service offering of their own that of the cluster, and returns them */
+    protected List<KubernetesClusterNodeType> copyServiceOfferingToNodeTypes(KubernetesClusterVO cluster) {
+        List<KubernetesClusterNodeType> copied = new ArrayList<>();
+        for (KubernetesClusterNodeType nodeType : getNodeTypes(cluster)) {
+            if (getNodeTypeServiceOfferingIdIfSet(cluster, nodeType) == null && cluster.getServiceOfferingId() != null) {
+                setNodeTypeServiceOfferingId(cluster, nodeType, cluster.getServiceOfferingId());
+                copied.add(nodeType);
+            }
+        }
+        return copied;
+    }
+
+    /** Whether every node type of the cluster has a service offering of its own */
+    public boolean hasNodeTypeServiceOfferings(KubernetesCluster cluster) {
+        return getNodeTypes(cluster).stream().allMatch(type -> getNodeTypeServiceOfferingIdIfSet(cluster, type) != null);
     }
 
     public Long getNodeTypeServiceOfferingIdIfSet(KubernetesCluster cluster, KubernetesClusterNodeType nodeType) {
