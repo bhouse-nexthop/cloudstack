@@ -963,4 +963,13 @@ public class KubernetesClusterManagerImplTest {
 
         Mockito.verify(roleService, Mockito.never()).findAllPermissionsBy(Mockito.anyLong());
     }
+
+    @Test
+    public void testCheckIfVmsAssociatedWithBackupOfferingSkipsMissingVms() {
+        VMInstanceVO vm = Mockito.mock(VMInstanceVO.class);
+        Mockito.when(vm.getBackupOfferingId()).thenReturn(null);
+        Assert.assertFalse(KubernetesClusterManagerImpl.checkIfVmsAssociatedWithBackupOffering(Arrays.asList(null, vm)));
+        Mockito.when(vm.getBackupOfferingId()).thenReturn(1L);
+        Assert.assertTrue(KubernetesClusterManagerImpl.checkIfVmsAssociatedWithBackupOffering(Arrays.asList(null, vm)));
+    }
 }
