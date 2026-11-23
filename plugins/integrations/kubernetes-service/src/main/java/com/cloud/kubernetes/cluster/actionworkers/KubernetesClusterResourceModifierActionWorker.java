@@ -954,8 +954,27 @@ public class KubernetesClusterResourceModifierActionWorker extends KubernetesClu
             updatedCluster.setMaxSize(maxSize);
             kubernetesClusterDao.persist(updatedCluster);
             // Prevent null attributes set by the createForUpdate method
-            return kubernetesClusterDao.findById(kubernetesCluster.getId());
+            KubernetesClusterVO cluster = kubernetesClusterDao.findById(kubernetesCluster.getId());
+            if (cluster != null) {
+                syncClusterServiceOfferingWithNodeOfferings(cluster);
+            }
+            return cluster;
         });
+    }
+
+    /**
+     * Once every node type that has nodes is on the same offering, it becomes the offering of the cluster. Otherwise the offering of
+     * the cluster stays as it is, as node types without an offering of their own still use it.
+     */
+    protected void syncClusterServiceOfferingWithNodeOfferings(KubernetesClusterVO cluster) {
+        Long commonOfferingId = KubernetesClusterUtil.getCommonNodeServiceOfferingId(cluster);
+        if (commonOfferingId == null || commonOfferingId.equals(cluster.getServiceOfferingId())) {
+            return;
+        }
+        logger.debug("Changing the service offering ID of Kubernetes cluster {} from {} to {}, the offering of all its nodes",
+                cluster, cluster.getServiceOfferingId(), commonOfferingId);
+        cluster.setServiceOfferingId(commonOfferingId);
+        kubernetesClusterDao.update(cluster.getId(), cluster);
     }
 
     private KubernetesClusterVO updateKubernetesClusterEntry(final Boolean autoscaleEnabled, final Long minSize, final Long maxSize) throws CloudRuntimeException {
@@ -1025,7 +1044,7 @@ public class KubernetesClusterResourceModifierActionWorker extends KubernetesClu
                         throw new CloudRuntimeException(result.second());
                     }
                 }
-                updateKubernetesClusterEntry(true, minSize, maxSize);
+                kubernetesCluster = updateKubernetesClusterEntry(true, minSize, maxSize);
             } else {
                 Pair<Boolean, String> result = SshHelper.sshExecute(publicIpAddress, sshPort, getControlNodeLoginUser(),
                         pkFile, null, String.format("sudo /opt/bin/autoscale-kube-cluster -d"),
@@ -1033,7 +1052,7 @@ public class KubernetesClusterResourceModifierActionWorker extends KubernetesClu
                 if (!result.first()) {
                     throw new CloudRuntimeException(result.second());
                 }
-                updateKubernetesClusterEntry(false, null, null);
+                kubernetesCluster = updateKubernetesClusterEntry(false, null, null);
             }
             return true;
         } catch (Exception e) {
