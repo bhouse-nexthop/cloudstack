@@ -35,8 +35,12 @@ import com.cloud.kubernetes.version.KubernetesSupportedVersionVO;
 import com.cloud.kubernetes.version.dao.KubernetesSupportedVersionDao;
 import com.cloud.network.Network;
 import com.cloud.network.dao.FirewallRulesDao;
+import com.cloud.network.dao.IPAddressDao;
+import com.cloud.network.dao.IPAddressVO;
 import com.cloud.network.rules.FirewallRule;
 import com.cloud.network.rules.FirewallRuleVO;
+import com.cloud.network.rules.PortForwardingRuleVO;
+import com.cloud.network.rules.dao.PortForwardingRulesDao;
 import com.cloud.network.vpc.NetworkACL;
 import com.cloud.offering.ServiceOffering;
 import com.cloud.service.ServiceOfferingVO;
@@ -47,6 +51,7 @@ import com.cloud.user.dao.UserDataDao;
 import com.cloud.storage.dao.VMTemplateDao;
 import com.cloud.user.Account;
 import com.cloud.user.AccountManager;
+import com.cloud.utils.net.Ip;
 import com.cloud.user.User;
 import org.apache.cloudstack.acl.Role;
 import org.apache.cloudstack.acl.RolePermission;
@@ -142,6 +147,12 @@ public class KubernetesClusterManagerImplTest {
 
     @Mock
     private UserDataDao userDataDao;
+
+    @Mock
+    private PortForwardingRulesDao pfRuleDao;
+
+    @Mock
+    private IPAddressDao ipAddressDao;
 
     @Spy
     @InjectMocks
@@ -1215,5 +1226,72 @@ public class KubernetesClusterManagerImplTest {
         Mockito.when(userDataDao.findById(5L)).thenReturn(cniConfig);
         kubernetesClusterManager.validateCniConfigForKubernetesCreateParameters(5L);
         Mockito.verify(accountManager).checkAccess(CallContext.current().getCallingAccount(), null, false, cniConfig);
+    }
+
+    private KubernetesClusterVmMapVO clusterVmMap(long vmId, boolean etcdNode) {
+        KubernetesClusterVmMapVO map = new KubernetesClusterVmMapVO(1L, vmId, false);
+        map.setEtcdNode(etcdNode);
+        return map;
+    }
+
+    private PortForwardingRuleVO portForwardingRule(long ipId, int publicPort, int privatePort, String protocol, long vmId) {
+        PortForwardingRuleVO rule = new PortForwardingRuleVO(null, ipId, publicPort, new Ip("10.1.1.10"), privatePort, protocol, 1L, 1L, 1L, vmId);
+        rule.setState(FirewallRule.State.Active);
+        return rule;
+    }
+
+    private void mockIpAddress(long id, String address) {
+        IPAddressVO ip = Mockito.mock(IPAddressVO.class);
+        Mockito.when(ip.getUuid()).thenReturn("ip-" + id);
+        Mockito.when(ip.getAddress()).thenReturn(new Ip(address));
+        Mockito.when(ipAddressDao.findById(id)).thenReturn(ip);
+    }
+
+    @Test
+    public void testGetEtcdIpsFindsRulesOutsideCurrentEtcdStartPort() {
+        Mockito.when(pfRuleDao.listByVm(101L)).thenReturn(List.of(portForwardingRule(10L, 60000, 22, NetUtils.TCP_PROTO, 101L)));
+        Mockito.when(pfRuleDao.listByVm(102L)).thenReturn(List.of(portForwardingRule(10L, 60001, 22, NetUtils.TCP_PROTO, 102L)));
+        mockIpAddress(10L, "203.0.113.10");
+
+        Map<String, String> etcdIps = kubernetesClusterManager.getEtcdIps(List.of(clusterVmMap(100L, false), clusterVmMap(101L, true), clusterVmMap(102L, true)));
+
+        Assert.assertEquals(Map.of("ip-10", "203.0.113.10"), etcdIps);
+        Mockito.verify(pfRuleDao, Mockito.never()).listByVm(100L);
+    }
+
+    @Test
+    public void testGetEtcdIpsUsesOnlyUnrevokedTcpRulesToSshPort() {
+        PortForwardingRuleVO revoked = portForwardingRule(13L, 50003, 22, NetUtils.TCP_PROTO, 101L);
+        revoked.setState(FirewallRule.State.Revoke);
+        PortForwardingRuleVO notYetApplied = portForwardingRule(14L, 50004, 22, NetUtils.TCP_PROTO, 101L);
+        notYetApplied.setState(FirewallRule.State.Add);
+        PortForwardingRuleVO portRange = new PortForwardingRuleVO(null, 15L, 50005, 50013, new Ip("10.1.1.10"), 22, 30, NetUtils.TCP_PROTO, 1L, 1L, 1L, 101L);
+        Mockito.when(pfRuleDao.listByVm(101L)).thenReturn(List.of(
+                portForwardingRule(11L, 50000, 2379, NetUtils.TCP_PROTO, 101L),
+                portForwardingRule(12L, 50001, 22, NetUtils.UDP_PROTO, 101L),
+                revoked,
+                portRange,
+                notYetApplied,
+                portForwardingRule(10L, 50002, 22, NetUtils.TCP_PROTO, 101L)));
+        mockIpAddress(10L, "203.0.113.10");
+        mockIpAddress(14L, "203.0.113.14");
+
+        Map<String, String> etcdIps = kubernetesClusterManager.getEtcdIps(List.of(clusterVmMap(101L, true)));
+
+        Assert.assertEquals(Map.of("ip-10", "203.0.113.10", "ip-14", "203.0.113.14"), etcdIps);
+        for (long excludedIpId : List.of(11L, 12L, 13L, 15L)) {
+            Mockito.verify(ipAddressDao, Mockito.never()).findById(excludedIpId);
+        }
+    }
+
+    @Test
+    public void testGetEtcdIpsSkipsMissingIpAddress() {
+        Mockito.when(pfRuleDao.listByVm(101L)).thenReturn(List.of(portForwardingRule(10L, 50000, 22, NetUtils.TCP_PROTO, 101L)));
+        Mockito.when(pfRuleDao.listByVm(102L)).thenReturn(List.of(portForwardingRule(11L, 50001, 22, NetUtils.TCP_PROTO, 102L)));
+        mockIpAddress(11L, "203.0.113.11");
+
+        Map<String, String> etcdIps = kubernetesClusterManager.getEtcdIps(List.of(clusterVmMap(101L, true), clusterVmMap(102L, true)));
+
+        Assert.assertEquals(Map.of("ip-11", "203.0.113.11"), etcdIps);
     }
 }
