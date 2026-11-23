@@ -1268,6 +1268,27 @@ public class KubernetesClusterRollingUpdateWorkerTest {
     }
 
     @Test
+    public void aWorkerWhoseUserDataWithTheNewJoinIsOverTheLimitIsRefusedBeforeTheDrain() {
+        setUpNewWorkerTemplate(Storage.TemplateType.USER);
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        // fits as it is, but not once the CA hash is pinned
+        int limit = org.apache.cloudstack.userdata.UserDataManager.VM_USERDATA_MAX_LENGTH.value();
+        String join = "\n" + OLD_JOIN + "\n";
+        String userData = "#" + "x".repeat(limit / 4 * 3 - join.length() - 3) + join;
+        Assert.assertTrue(org.apache.commons.codec.binary.Base64.encodeBase64String(userData.getBytes()).length() <= limit);
+        vmUserData.put(w1.getId(), userData);
+
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class, newWorker(1)::rollout);
+
+        Assert.assertTrue(e.getMessage(), e.getMessage().contains("vm.userdata.max.length"));
+        Assert.assertFalse(calls.contains("drain:w1"));
+        Assert.assertFalse(calls.contains("stop:w1"));
+        Assert.assertTrue(calls.toString(), calls.contains("tokenDelete:fresh1"));
+        Assert.assertEquals(userData, vmUserData.get(w1.getId()));
+    }
+
+    @Test
     public void aJoinTokenThatCanNotBeCreatedStopsTheBatchBeforeTheDrain() {
         setUpNewWorkerTemplate(Storage.TemplateType.USER);
         addStackedControlPlane(1);

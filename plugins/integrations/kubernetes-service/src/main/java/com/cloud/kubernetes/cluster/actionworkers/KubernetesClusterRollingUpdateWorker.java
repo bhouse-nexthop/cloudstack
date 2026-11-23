@@ -481,6 +481,12 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
             }
             if (batch.stream().anyMatch(node -> node.recreate)) {
                 createRecreateJoinToken();
+                // with the token each one gets, before any node of the batch is touched
+                for (Node node : batch) {
+                    if (node.recreate) {
+                        validateNodeUserDataLength(getJoinUserData(node.vm, recreateJoin.first(), recreateJoin.second()), WORKER);
+                    }
+                }
             }
             for (Node node : batch) {
                 annotateAndCordon(node, statuses.get(getNodeName(node.vm)));

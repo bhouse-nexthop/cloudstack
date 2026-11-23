@@ -299,6 +299,7 @@ public class KubernetesClusterStartWorker extends KubernetesClusterResourceModif
             cniConfig = Base64.encodeBase64String(cniConfig.getBytes(com.cloud.utils.StringUtils.getPreferredCharset()));
             base64UserData = userDataManager.concatenateUserData(base64UserData, cniConfig, null);
         }
+        validateNodeUserDataLength(base64UserData, CONTROL);
 
         List<String> keypairs = new ArrayList<String>();
         if (StringUtils.isNotBlank(kubernetesCluster.getKeyPair())) {
@@ -472,6 +473,7 @@ public class KubernetesClusterStartWorker extends KubernetesClusterResourceModif
         }
 
         String base64UserData = Base64.encodeBase64String(k8sControlNodeConfig.getBytes(com.cloud.utils.StringUtils.getPreferredCharset()));
+        validateNodeUserDataLength(base64UserData, CONTROL);
         List<String> keypairs = new ArrayList<String>();
         if (StringUtils.isNotBlank(kubernetesCluster.getKeyPair())) {
             keypairs.add(kubernetesCluster.getKeyPair());
@@ -517,6 +519,7 @@ public class KubernetesClusterStartWorker extends KubernetesClusterResourceModif
         }
 
         String base64UserData = Base64.encodeBase64String(k8sControlNodeConfig.getBytes(com.cloud.utils.StringUtils.getPreferredCharset()));
+        validateNodeUserDataLength(base64UserData, ETCD);
         List<String> keypairs = new ArrayList<String>();
         if (StringUtils.isNotBlank(kubernetesCluster.getKeyPair())) {
             keypairs.add(kubernetesCluster.getKeyPair());
@@ -888,9 +891,13 @@ public class KubernetesClusterStartWorker extends KubernetesClusterResourceModif
         List<UserVm> etcdVms = new ArrayList<>();
         List<Network.IpAddresses> etcdGuestNodeIps = new ArrayList<>();
         if (kubernetesCluster.getEtcdNodeCount() > 0) {
-            Pair<List<UserVm>, List<Network.IpAddresses>> etcdNodesAndIps = provisionEtcdCluster(network, domainId, accountId);
-            etcdVms = etcdNodesAndIps.first();
-            etcdGuestNodeIps = etcdNodesAndIps.second();
+            try {
+                Pair<List<UserVm>, List<Network.IpAddresses>> etcdNodesAndIps = provisionEtcdCluster(network, domainId, accountId);
+                etcdVms = etcdNodesAndIps.first();
+                etcdGuestNodeIps = etcdNodesAndIps.second();
+            } catch (InvalidParameterValueException e) {
+                logTransitStateAndThrow(Level.ERROR, String.format("Provisioning etcd nodes failed in the Kubernetes cluster : %s", kubernetesCluster.getName()), kubernetesCluster.getId(), KubernetesCluster.Event.CreateFailed, e);
+            }
         }
 
         List<UserVm> clusterVMs = new ArrayList<>();
