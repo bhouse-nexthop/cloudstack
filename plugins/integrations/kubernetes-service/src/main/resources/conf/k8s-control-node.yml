@@ -379,7 +379,9 @@ write_files:
       sudo touch /home/cloud/success
       echo "true" > /home/cloud/success
 
-  {% if "{{ registry.enabled }}" == "true" %}
+# Keep jinja block tags at column 0: cloud-init renders with trim_blocks,
+# so any indent before a tag would be prepended to the next line.
+{% if "{{ registry.enabled }}" == "true" %}
   - path: /opt/bin/setup-containerd
     permissions: '0755'
     owner: root:root
@@ -401,7 +403,7 @@ write_files:
       echo "Restarting containerd service"
       systemctl daemon-reload
       systemctl restart containerd
-  {% endif %}
+{% endif %}
 
   - path: /etc/systemd/system/deploy-kube-system.service
     permissions: '0755'

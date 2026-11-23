@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 import org.apache.cloudstack.affinity.AffinityGroupVO;
 import org.apache.cloudstack.affinity.dao.AffinityGroupDao;
@@ -648,7 +649,11 @@ public class KubernetesClusterActionWorkerTest {
         String config = actionWorker.updateKubeConfigWithRegistryDetails(actionWorker.readResourceFile("conf/k8s-control-node.yml"));
         Assert.assertTrue(config.startsWith("## template: jinja"));
         Assert.assertTrue(config.contains("{% if \"true\" == \"true\" %}"));
-        Assert.assertTrue(config.contains("- path: /opt/bin/setup-containerd"));
+        // cloud-init renders with trim_blocks: a block tag and its newline are
+        // dropped but any indent before the tag stays, joining the next line.
+        String rendered = config.replaceAll("\\{%[^%]*%\\}\n", "");
+        Assert.assertTrue(rendered.contains("\n  - path: /opt/bin/setup-containerd\n"));
+        Assert.assertTrue(rendered.contains("restart containerd\n\n  - path: /etc/systemd/system/deploy-kube-system.service\n"));
         Assert.assertTrue(config.contains("- bash -x /opt/bin/setup-containerd"));
         Assert.assertTrue(config.contains("registry.mirrors.\\\"index.docker.io/v1/\\\""));
     }
@@ -659,7 +664,23 @@ public class KubernetesClusterActionWorkerTest {
         String config = actionWorker.updateKubeConfigWithRegistryDetails(actionWorker.readResourceFile("conf/k8s-control-node.yml"));
         Assert.assertTrue(config.contains("{% if \"false\" == \"true\" %}"));
         Assert.assertFalse(config.contains("{{ registry.enabled }}"));
+        // The false branch renders away entirely, leaving the next item at indent 2.
+        String rendered = config.replaceAll("(?s)\\{% if \"false\" == \"true\" %\\}\n.*?\\{% endif %\\}\n", "");
+        Assert.assertFalse(rendered.contains("setup-containerd"));
+        Assert.assertTrue(rendered.contains("\n\n  - path: /etc/systemd/system/deploy-kube-system.service\n"));
         Assert.assertFalse(config.contains("- bash -x /opt/bin/setup-containerd"));
+    }
+
+    @Test
+    public void testNodeTemplatesHaveNoIndentedJinjaBlockTags() throws IOException {
+        // cloud-init renders with trim_blocks and without lstrip_blocks, so an
+        // indented block tag shifts the next line and breaks the YAML.
+        Pattern indentedTag = Pattern.compile("^[ \\t]+\\{[%#]");
+        for (String template : Arrays.asList("conf/k8s-control-node.yml", "conf/k8s-control-node-add.yml", "conf/k8s-node.yml", "conf/etcd-node.yml")) {
+            for (String line : actionWorker.readResourceFile(template).split("\n")) {
+                Assert.assertFalse(template + ": " + line, indentedTag.matcher(line).find());
+            }
+        }
     }
 
     private void mockRegistryDetails(String url) {
