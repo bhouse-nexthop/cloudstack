@@ -46,6 +46,7 @@ import org.mockito.junit.MockitoJUnitRunner;
 import com.cloud.kubernetes.cluster.KubernetesCluster;
 import com.cloud.kubernetes.cluster.KubernetesClusterDetailsVO;
 import com.cloud.kubernetes.cluster.KubernetesClusterManagerImpl;
+import com.cloud.kubernetes.cluster.migrations.KubernetesClusterMigration;
 import com.cloud.kubernetes.cluster.KubernetesClusterVO;
 import com.cloud.kubernetes.cluster.KubernetesClusterVmMapVO;
 import com.cloud.kubernetes.cluster.KubernetesServiceHelper.KubernetesClusterNodeType;
@@ -1576,5 +1577,148 @@ public class KubernetesClusterRollingUpdateWorkerTest {
         Assert.assertFalse(calls.contains("stop:e1"));
         Mockito.verify(detailsDao).addDetail(Mockito.eq(CLUSTER_ID), Mockito.eq(KubernetesClusterManagerImpl.ROLLOUT_LAST_ERROR_DETAIL),
                 Mockito.contains("the 3 etcd node(s) were not restarted"), Mockito.anyBoolean());
+    }
+
+    // migrations
+
+    /** A node migration of the VMs in pending, which it applies to stopped VMs only */
+    private KubernetesClusterMigration nodeMigration(Set<Long> pending) {
+        KubernetesClusterMigration migration = Mockito.mock(KubernetesClusterMigration.class);
+        Mockito.when(migration.getId()).thenReturn("node");
+        Mockito.when(migration.getScope()).thenReturn(KubernetesClusterMigration.Scope.NODE);
+        Mockito.when(migration.isPendingOnNode(Mockito.any(), Mockito.any())).thenAnswer(i -> pending.contains(((UserVmVO) i.getArgument(1)).getId()));
+        Mockito.doAnswer(i -> {
+            UserVmVO vm = i.getArgument(1);
+            Assert.assertEquals(VirtualMachine.State.Stopped, vmStates.get(vm.getId()));
+            pending.remove(vm.getId());
+            return calls.add("migrate:" + vm.getHostName());
+        }).when(migration).applyToStoppedNode(Mockito.any(), Mockito.any());
+        Mockito.when(migration.verify(Mockito.any(), Mockito.any())).thenAnswer(i -> pending.isEmpty());
+        return migration;
+    }
+
+    @Test
+    public void nodeMigrationRestartsOnlyThePendingNodesOnceAndIsRecorded() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        addNode("w2", WORKER, NEW_OFFERING);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        worker.setMigrations(List.of(nodeMigration(new HashSet<>(Set.of(w1.getId())))));
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertEquals(List.of("annotate:w1", "cordon:w1", "drain:w1", "stop:w1", "migrate:w1", "start:w1", "release:w1",
+                "event:OperationSucceeded"), calls);
+        Mockito.verify(manager).markMigrationApplied(CLUSTER_ID, "node");
+    }
+
+    @Test
+    public void clusterMigrationRunsBeforeTheNodesAndIsRecorded() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        KubernetesClusterMigration onCluster = Mockito.mock(KubernetesClusterMigration.class);
+        Mockito.when(onCluster.getId()).thenReturn("cluster");
+        Mockito.when(onCluster.getScope()).thenReturn(KubernetesClusterMigration.Scope.CLUSTER);
+        Mockito.when(onCluster.verify(Mockito.any(), Mockito.any())).thenReturn(true);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        Mockito.doAnswer(i -> calls.add("cluster")).when(onCluster).applyToCluster(worker);
+        worker.setMigrations(List.of(onCluster, nodeMigration(new HashSet<>(Set.of(w1.getId())))));
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertEquals("cluster", calls.get(0));
+        Assert.assertTrue(calls.contains("migrate:w1"));
+        Mockito.verify(manager).markMigrationApplied(CLUSTER_ID, "cluster");
+        Mockito.verify(manager).markMigrationApplied(CLUSTER_ID, "node");
+    }
+
+    @Test
+    public void migrationLeftOnSkippedNodesFailsTheRolloutAndIsNotRecorded() {
+        // a single control node is not restarted, so the migration stays pending on it
+        UserVmVO c1 = addNode("c1", CONTROL, OLD_OFFERING);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        worker.setMigrations(List.of(nodeMigration(new HashSet<>(Set.of(c1.getId(), w1.getId())))));
+
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class, worker::rollout);
+
+        Assert.assertTrue(e.getMessage(), e.getMessage().contains("not applied") && e.getMessage().contains("applyKubernetesClusterMigrations"));
+        Assert.assertTrue(calls.contains("migrate:w1"));
+        Assert.assertFalse(calls.contains("stop:c1"));
+        Mockito.verify(manager, Mockito.never()).markMigrationApplied(Mockito.anyLong(), Mockito.anyString());
+    }
+
+    @Test
+    public void aClusterMigrationThatFailsLeavesTheNodeMigrationsToBeApplied() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        KubernetesClusterMigration onCluster = Mockito.mock(KubernetesClusterMigration.class);
+        Mockito.when(onCluster.getId()).thenReturn("cluster");
+        Mockito.when(onCluster.getScope()).thenReturn(KubernetesClusterMigration.Scope.CLUSTER);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        Mockito.doThrow(new CloudRuntimeException("Headlamp is not running")).when(onCluster).applyToCluster(worker);
+        worker.setMigrations(List.of(onCluster, nodeMigration(new HashSet<>(Set.of(w1.getId())))));
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertTrue(details.contains(KubernetesClusterManagerImpl.ROLLOUT_LAST_ERROR_DETAIL));
+        Assert.assertTrue(calls.contains("migrate:w1"));
+        Mockito.verify(onCluster, Mockito.never()).verify(Mockito.any(), Mockito.any());
+        Mockito.verify(manager).markMigrationApplied(CLUSTER_ID, "node");
+        Mockito.verify(manager, Mockito.never()).markMigrationApplied(CLUSTER_ID, "cluster");
+    }
+
+    @Test
+    public void anUnverifiedClusterMigrationIsLeftPendingWithoutFailing() {
+        addStackedControlPlane(1);
+        addNode("w1", WORKER, OLD_OFFERING);
+        KubernetesClusterMigration onCluster = Mockito.mock(KubernetesClusterMigration.class);
+        Mockito.when(onCluster.getId()).thenReturn("cluster");
+        Mockito.when(onCluster.getScope()).thenReturn(KubernetesClusterMigration.Scope.CLUSTER);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        worker.setMigrations(List.of(onCluster));
+
+        Assert.assertTrue(worker.rollout());
+
+        Mockito.verify(manager, Mockito.never()).markMigrationApplied(Mockito.anyLong(), Mockito.anyString());
+        Assert.assertTrue(details.contains(KubernetesClusterManagerImpl.ROLLOUT_LAST_ERROR_DETAIL));
+    }
+
+    @Test
+    public void onlyClusterMigrationsRestartNoNode() {
+        addStackedControlPlane(1);
+        addNode("w1", WORKER, OLD_OFFERING);
+        KubernetesClusterMigration onCluster = Mockito.mock(KubernetesClusterMigration.class);
+        Mockito.when(onCluster.getId()).thenReturn("cluster");
+        Mockito.when(onCluster.getScope()).thenReturn(KubernetesClusterMigration.Scope.CLUSTER);
+        Mockito.when(onCluster.verify(Mockito.any(), Mockito.any())).thenReturn(true);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        worker.setMigrations(List.of(onCluster));
+        // of an earlier rollout, which may have left a node down
+        details.add(KubernetesClusterManagerImpl.ROLLOUT_LAST_ERROR_DETAIL);
+
+        Assert.assertTrue(worker.rollout());
+
+        Assert.assertFalse(calls.contains("stop:w1"));
+        Mockito.verify(manager).markMigrationApplied(CLUSTER_ID, "cluster");
+        Assert.assertTrue(details.contains(KubernetesClusterManagerImpl.ROLLOUT_LAST_ERROR_DETAIL));
+    }
+
+    @Test
+    public void aClusterMigrationIsRecordedEvenWhenTheNodesFail() {
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+        failingStarts.add("w1");
+        KubernetesClusterMigration onCluster = Mockito.mock(KubernetesClusterMigration.class);
+        Mockito.when(onCluster.getId()).thenReturn("cluster");
+        Mockito.when(onCluster.getScope()).thenReturn(KubernetesClusterMigration.Scope.CLUSTER);
+        Mockito.when(onCluster.verify(Mockito.any(), Mockito.any())).thenReturn(true);
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        worker.setMigrations(List.of(onCluster, nodeMigration(new HashSet<>(Set.of(w1.getId())))));
+
+        Assert.assertThrows(CloudRuntimeException.class, worker::rollout);
+
+        Mockito.verify(manager).markMigrationApplied(CLUSTER_ID, "cluster");
+        Mockito.verify(manager, Mockito.never()).markMigrationApplied(CLUSTER_ID, "node");
     }
 }

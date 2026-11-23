@@ -276,3 +276,14 @@ UPDATE `cloud`.`storage_pool` SET `storage_provider_name` = 'FlashArray' WHERE `
 CALL `cloud`.`IDEMPOTENT_ADD_COLUMN`('cloud.kubernetes_cluster', 'control_node_root_disk_size', 'bigint unsigned DEFAULT NULL COMMENT "root disk size in GB of the control nodes, node_root_disk_size when not set"');
 CALL `cloud`.`IDEMPOTENT_ADD_COLUMN`('cloud.kubernetes_cluster', 'worker_node_root_disk_size', 'bigint unsigned DEFAULT NULL COMMENT "root disk size in GB of the worker nodes, node_root_disk_size when not set"');
 CALL `cloud`.`IDEMPOTENT_ADD_COLUMN`('cloud.kubernetes_cluster', 'etcd_node_root_disk_size', 'bigint unsigned DEFAULT NULL COMMENT "root disk size in GB of the etcd nodes, the size of the template when not set"');
+
+-- CKS: the migrations applied to each Kubernetes cluster
+CREATE TABLE IF NOT EXISTS `cloud`.`kubernetes_cluster_migrations` (
+    `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+    `cluster_id` bigint unsigned NOT NULL COMMENT 'kubernetes cluster id',
+    `migration_id` varchar(64) NOT NULL COMMENT 'id of the migration, as CKS names it',
+    `applied` datetime NOT NULL COMMENT 'date the migration was applied',
+    PRIMARY KEY (`id`),
+    CONSTRAINT `fk_kubernetes_cluster_migrations__cluster_id` FOREIGN KEY (`cluster_id`) REFERENCES `kubernetes_cluster`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uc_kubernetes_cluster_migrations__cluster_id__migration_id` (`cluster_id`, `migration_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;

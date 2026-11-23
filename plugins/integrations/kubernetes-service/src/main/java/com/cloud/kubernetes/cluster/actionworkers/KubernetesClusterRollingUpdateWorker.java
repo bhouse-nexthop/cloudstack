@@ -51,6 +51,7 @@ import com.cloud.kubernetes.cluster.KubernetesClusterService;
 import com.cloud.kubernetes.cluster.KubernetesClusterVO;
 import com.cloud.kubernetes.cluster.KubernetesClusterVmMapVO;
 import com.cloud.kubernetes.cluster.KubernetesServiceHelper.KubernetesClusterNodeType;
+import com.cloud.kubernetes.cluster.migrations.KubernetesClusterMigration;
 import com.cloud.kubernetes.cluster.utils.KubernetesClusterUtil;
 import com.cloud.kubernetes.version.KubernetesSupportedVersion;
 import com.cloud.storage.DiskOfferingVO;
@@ -92,7 +93,7 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
     public static final String BOOT_ID_ANNOTATION = "cloudstack.apache.org/rollout-boot-id";
     /** A detail of a VM that is being recreated, so that a rollout that stopped recreates it again rather than only starting it */
     public static final String RECREATE_DETAIL = "cks.rollout.recreate";
-    protected static final String KUBECTL = "sudo /opt/bin/kubectl ";
+    public static final String KUBECTL = "sudo /opt/bin/kubectl ";
     /** One line per node: its name, Ready condition, boot ID, rollout annotation and whether it is cordoned, tab separated */
     protected static final String NODE_STATUSES_COMMAND = KUBECTL + "get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\"\\t\"}"
             + "{.status.conditions[?(@.type==\"Ready\")].status}{\"\\t\"}{.status.nodeInfo.bootID}{\"\\t\"}"
@@ -198,11 +199,21 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
     protected String recreateJoinIp;
     /** Whether the API server certificate is valid for the addresses recreated workers joined on, as checked in a batch */
     protected Map<String, Boolean> certificateValidFor = new HashMap<>();
+    /** The migrations this rollout applies, in their order */
+    protected List<KubernetesClusterMigration> migrations = List.of();
 
     public KubernetesClusterRollingUpdateWorker(final KubernetesCluster kubernetesCluster, final int maxUnavailable,
                                                 final KubernetesClusterManagerImpl clusterManager) {
         super(kubernetesCluster, clusterManager);
         this.maxUnavailable = maxUnavailable;
+    }
+
+    public void setMigrations(final List<KubernetesClusterMigration> migrations) {
+        this.migrations = migrations;
+    }
+
+    public KubernetesCluster getKubernetesCluster() {
+        return kubernetesCluster;
     }
 
     // pure decisions
@@ -297,12 +308,40 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
         begin();
         String error;
         List<String> skipped = new ArrayList<>();
+        // cluster migrations alone leave the nodes as they are, even those left down
+        final boolean rollsNodes = migrations.isEmpty() || migrations.stream().anyMatch(migration -> migration.getScope() == KubernetesClusterMigration.Scope.NODE);
         try {
             // the settings to roll out, which the caller stored after begin()
             kubernetesCluster = kubernetesClusterDao.findById(kubernetesCluster.getId());
             // nodes a rollout that stopped restarted, but did not get to uncordon, are not restarted again
             releaseNodesThatAreBack();
-            error = rollNodes(skipped);
+            List<KubernetesClusterMigration> settled = new ArrayList<>();
+            for (KubernetesClusterMigration migration : migrations) {
+                if (migration.getScope() != KubernetesClusterMigration.Scope.CLUSTER) {
+                    continue;
+                }
+                logger.info("Applying migration {} to Kubernetes cluster {}", migration.getId(), kubernetesCluster);
+                try {
+                    migration.applyToCluster(this);
+                    // recorded before the nodes, which a retry of a rollout that stopped on them does not redo it for
+                    if (migration.verify(kubernetesCluster, this)) {
+                        manager.markMigrationApplied(kubernetesCluster.getId(), migration.getId());
+                        logger.info("Applied migration {} to Kubernetes cluster {}", migration.getId(), kubernetesCluster);
+                    } else {
+                        skipped.add(String.format("migration %s was applied, but is not verified yet", migration.getId()));
+                    }
+                    settled.add(migration);
+                } catch (CloudRuntimeException e) {
+                    // left pending, without keeping the others from being applied
+                    logger.warn("Unable to apply migration {} to Kubernetes cluster {}", migration.getId(), kubernetesCluster, e);
+                    skipped.add(String.format("migration %s was not applied: %s", migration.getId(), e.getMessage()));
+                    settled.add(migration);
+                }
+            }
+            error = rollsNodes ? rollNodes(skipped) : null;
+            if (error == null) {
+                error = recordMigrations(settled);
+            }
         } catch (Exception e) {
             logger.warn("Rollout of Kubernetes cluster {} failed", kubernetesCluster, e);
             error = StringUtils.defaultIfEmpty(e.getMessage(), e.getClass().getSimpleName());
@@ -312,10 +351,12 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
             problems.add(0, error);
         }
         final String summary = problems.isEmpty() ? null : String.join("; ", problems);
-        release(summary);
+        // without node work, the last error, which may tell of a node left down, is only replaced by a new one
+        release(summary, rollsNodes || summary != null);
         if (error != null) {
-            throw new CloudRuntimeException(String.format("The rollout of Kubernetes cluster %s stopped: %s. Call updateKubernetesCluster with rollout=true " +
-                    "to resume it", kubernetesCluster.getName(), summary));
+            throw new CloudRuntimeException(String.format("The rollout of Kubernetes cluster %s stopped: %s. Call %s to resume it", kubernetesCluster.getName(), summary,
+                    migrations.isEmpty() ? "updateKubernetesCluster with rollout=true"
+                            : "applyKubernetesClusterMigrations, or updateKubernetesCluster with rollout=true to only start the nodes left down"));
         }
         logger.info("Rollout of Kubernetes cluster {} completed{}", kubernetesCluster, summary == null ? "" : ", but " + summary);
         return true;
@@ -356,6 +397,39 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
         return null;
     }
 
+    /** Records the migrations that are done, but those recorded or reported already; returns which are not, or null */
+    protected String recordMigrations(final List<KubernetesClusterMigration> settled) {
+        List<String> notApplied = new ArrayList<>();
+        for (KubernetesClusterMigration migration : migrations) {
+            if (settled.contains(migration)) {
+                continue;
+            }
+            if (migration.verify(kubernetesCluster, this)) {
+                manager.markMigrationApplied(kubernetesCluster.getId(), migration.getId());
+                logger.info("Applied migration {} to Kubernetes cluster {}", migration.getId(), kubernetesCluster);
+            } else {
+                notApplied.add(migration.getId());
+            }
+        }
+        return notApplied.isEmpty() ? null : String.format("the migrations %s are not applied to the whole cluster", notApplied);
+    }
+
+    /**
+     * Why a node is to be restarted, or null: a rollout of migrations restarts the nodes a migration of which is
+     * pending, any other the nodes that differ from the settings of their type
+     */
+    protected String getRestartReason(final KubernetesClusterVmMapVO vmMap, final UserVmVO vm) {
+        if (migrations.isEmpty()) {
+            return manager.getNodeOutOfDateReason(kubernetesCluster, vmMap, vm);
+        }
+        for (KubernetesClusterMigration migration : migrations) {
+            if (migration.getScope() == KubernetesClusterMigration.Scope.NODE && migration.isPendingOnNode(kubernetesCluster, vm)) {
+                return String.format("migration %s is pending", migration.getId());
+            }
+        }
+        return null;
+    }
+
     protected boolean isCancelRequested() {
         return kubernetesClusterDetailsDao.findDetail(kubernetesCluster.getId(), KubernetesClusterManagerImpl.ROLLOUT_CANCEL_DETAIL) != null;
     }
@@ -380,7 +454,7 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
             boolean recreating = type == WORKER && vmInstanceDetailsDao.findDetail(vm.getId(), RECREATE_DETAIL) != null;
             if (stopped || recreating || status != null && status.annotation != null) {
                 unfinished.add(vm.getId());
-            } else if (manager.getNodeOutOfDateReason(kubernetesCluster, vmMap, vm) == null) {
+            } else if (getRestartReason(vmMap, vm) == null) {
                 continue;
             }
             nodes.add(new Node(vmMap, vm));
@@ -421,6 +495,13 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
             if (type != WORKER) {
                 checkQuorum(batch.get(0), statuses);
             }
+            // a node migration that can no longer be applied would leave the nodes down
+            for (KubernetesClusterMigration migration : migrations) {
+                String reason = migration.getScope() == KubernetesClusterMigration.Scope.NODE ? migration.checkPrecondition(kubernetesCluster) : null;
+                if (reason != null) {
+                    throw new CloudRuntimeException(String.format("migration %s can not be applied: %s", migration.getId(), reason));
+                }
+            }
             for (Node node : batch) {
                 node.recreate = isRecreateNeeded(node);
                 if (node.recreate) {
@@ -455,7 +536,11 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
                 node.back = true;
             }
             for (Node node : batch) {
-                String reason = manager.getNodeOutOfDateReason(kubernetesCluster, node.vmMap, userVmDao.findById(node.vm.getId()));
+                UserVmVO vm = userVmDao.findById(node.vm.getId());
+                String reason = manager.getNodeOutOfDateReason(kubernetesCluster, node.vmMap, vm);
+                if (reason == null && !migrations.isEmpty()) {
+                    reason = getRestartReason(node.vmMap, vm);
+                }
                 if (reason != null) {
                     throw new CloudRuntimeException(String.format("node %s still differs from the settings of its type after its restart: %s", getNodeName(node.vm), reason));
                 }
@@ -653,7 +738,10 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
         node.vm = vm;
     }
 
-    /** Gives the stopped VM the template, service offering, root disk size and affinity groups of its node type, as needed */
+    /**
+     * Gives the stopped VM the template, service offering, root disk size and affinity groups of its node type, as needed,
+     * and applies the node migrations of the rollout to it
+     */
     protected void applySettings(final Node node) {
         final String name = getNodeName(node.vm);
         try {
@@ -685,6 +773,15 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
                 // the explicit dedication group CKS gives the nodes of a dedicated domain or account stays
                 groupIds.addAll(manager.getVmAffinityGroupIds(node.vm.getId(), true));
                 affinityGroupVMMapDao.updateMap(node.vm.getId(), new ArrayList<>(groupIds));
+            }
+            for (KubernetesClusterMigration migration : migrations) {
+                if (migration.getScope() != KubernetesClusterMigration.Scope.NODE) {
+                    continue;
+                }
+                node.vm = userVmDao.findById(node.vm.getId());
+                if (migration.isPendingOnNode(kubernetesCluster, node.vm)) {
+                    migration.applyToStoppedNode(kubernetesCluster, node.vm);
+                }
             }
         } catch (CloudRuntimeException e) {
             throw e;
@@ -1187,7 +1284,7 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
     }
 
     /** The output of a kubectl command, or null if it failed */
-    protected String runKubectl(final String command) {
+    public String runKubectl(final String command) {
         try {
             Pair<Boolean, String> result = executeSshCommand(kubectlAddress.first(), kubectlAddress.second(), command, 10000, 10000, 60000);
             return Boolean.TRUE.equals(result.first()) && result.second() != null ? result.second() : null;
