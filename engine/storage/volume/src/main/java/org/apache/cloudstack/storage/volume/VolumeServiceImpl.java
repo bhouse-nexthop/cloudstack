@@ -160,6 +160,9 @@ import com.cloud.utils.NumbersUtil;
 import com.cloud.utils.Pair;
 import com.cloud.utils.db.DB;
 import com.cloud.utils.db.GlobalLock;
+import com.cloud.utils.db.Transaction;
+import com.cloud.utils.db.TransactionCallbackNoReturn;
+import com.cloud.utils.db.TransactionStatus;
 import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.vm.VirtualMachine;
 
@@ -2034,22 +2037,29 @@ public class VolumeServiceImpl implements VolumeService {
             return;
         }
         String srcImagePath = srcPool.getPath() + "/" + srcVolume.getPath() + "/";
-        for (SnapshotDataStoreVO snapshotStore : _snapshotStoreDao.listAllByVolumeAndDataStore(srcVolume.getId(), DataStoreRole.Primary)) {
-            if (snapshotStore.getDataStoreId() != srcPool.getId()) {
-                continue;
+        // the refs of the snapshots rbd migration carried to the new pool move to the new volume now, or destroying the source
+        // volume deletes them; the snapshots and their secondary copies follow once the migration succeeds (VolumeOrchestrator)
+        Transaction.execute(new TransactionCallbackNoReturn() {
+            @Override
+            public void doInTransactionWithoutResult(TransactionStatus status) {
+                for (SnapshotDataStoreVO snapshotStore : _snapshotStoreDao.listAllByVolumeAndDataStore(srcVolume.getId(), DataStoreRole.Primary)) {
+                    if (snapshotStore.getDataStoreId() != srcPool.getId()) {
+                        continue;
+                    }
+                    if (!StringUtils.startsWith(snapshotStore.getInstallPath(), srcImagePath)) {
+                        logger.warn("Snapshot {} on primary storage has install path {}, not under {}; it stays with volume {} and is removed with it",
+                                snapshotStore.getSnapshotId(), snapshotStore.getInstallPath(), srcImagePath, srcVolume);
+                        continue;
+                    }
+                    String snapshotName = snapshotStore.getInstallPath().substring(srcImagePath.length());
+                    snapshotStore.setDataStoreId(destPool.getId());
+                    snapshotStore.setVolumeId(destVolume.getId());
+                    snapshotStore.setInstallPath(destPool.getPath() + "/" + srcVolume.getPath() + "/" + snapshotName);
+                    _snapshotStoreDao.update(snapshotStore.getId(), snapshotStore);
+                    logger.debug("Snapshot {} on primary storage moved with volume {} to pool {}", snapshotStore.getSnapshotId(), srcVolume, destPool);
+                }
             }
-            if (!StringUtils.startsWith(snapshotStore.getInstallPath(), srcImagePath)) {
-                logger.warn("Snapshot {} on primary storage has install path {}, not under {}; it is not moved with volume {}",
-                        snapshotStore.getSnapshotId(), snapshotStore.getInstallPath(), srcImagePath, srcVolume);
-                continue;
-            }
-            String snapshotName = snapshotStore.getInstallPath().substring(srcImagePath.length());
-            snapshotStore.setDataStoreId(destPool.getId());
-            snapshotStore.setVolumeId(destVolume.getId());
-            snapshotStore.setInstallPath(destPool.getPath() + "/" + srcVolume.getPath() + "/" + snapshotName);
-            _snapshotStoreDao.update(snapshotStore.getId(), snapshotStore);
-            logger.debug("Snapshot {} on primary storage moved with volume {} to pool {}", snapshotStore.getSnapshotId(), srcVolume, destPool);
-        }
+        });
     }
 
     @Override

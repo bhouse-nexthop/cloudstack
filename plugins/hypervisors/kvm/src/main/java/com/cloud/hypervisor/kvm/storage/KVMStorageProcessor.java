@@ -3491,6 +3491,10 @@ public class KVMStorageProcessor implements StorageProcessor {
                 Volume.Type volumeType = srcVol.getVolumeType();
 
                 resource.createOrUpdateLogFileForCommand(cmd, Command.State.PROCESSING_IN_BACKEND);
+                if (!rbdMigration && cmd.getOptions() != null && Boolean.parseBoolean(cmd.getOptions().get(CopyCommand.KEEP_PRIMARY_SNAPSHOTS))) {
+                    throw new CloudRuntimeException(String.format("Volume %s has snapshots that exist only on its primary storage and can only be moved "
+                            + "with rbd migration to another pool of the same Ceph cluster", srcVol.getUuid()));
+                }
                 if (rbdMigration) {
                     newVolume = migrateRbdImage(volume, destPool, cmd.getWaitInMillSeconds());
                 } else if (srcVol.getPassphrase() != null && (Volume.Type.ROOT.equals(volumeType) || Volume.Type.DATADISK.equals(volumeType))) {

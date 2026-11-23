@@ -3418,4 +3418,58 @@ public class VolumeApiServiceImplTest {
         assertEquals(Long.valueOf(storagePoolMockId + 1), migrateCmd.getValue().getStoragePoolId());
         assertEquals(Long.valueOf(newDiskOfferingMockId), migrateCmd.getValue().getNewDiskOfferingId());
     }
+
+    private StoragePoolVO rbdPool(String path) {
+        StoragePoolVO pool = Mockito.mock(StoragePoolVO.class);
+        Mockito.lenient().when(pool.getPoolType()).thenReturn(Storage.StoragePoolType.RBD);
+        Mockito.lenient().when(pool.isManaged()).thenReturn(false);
+        Mockito.lenient().when(pool.getHostAddress()).thenReturn("10.0.0.1");
+        Mockito.lenient().when(pool.getPort()).thenReturn(6789);
+        Mockito.lenient().when(pool.getUserInfo()).thenReturn("cloudstack:secret");
+        Mockito.lenient().when(pool.getPath()).thenReturn(path);
+        return pool;
+    }
+
+    @Test
+    public void isOfflineRbdMoveWithinCephClusterBetweenPoolsOfTheSameCluster() {
+        Assert.assertTrue(volumeApiServiceImpl.isOfflineRbdMoveWithinCephCluster(HypervisorType.KVM, rbdPool("vm-images"), rbdPool("vm-images-ec")));
+    }
+
+    @Test
+    public void isOfflineRbdMoveWithinCephClusterNotForAnotherHypervisor() {
+        Assert.assertFalse(volumeApiServiceImpl.isOfflineRbdMoveWithinCephCluster(HypervisorType.VMware, rbdPool("vm-images"), rbdPool("vm-images-ec")));
+    }
+
+    @Test
+    public void isOfflineRbdMoveWithinCephClusterNotIntoTheSameCephPool() {
+        Assert.assertFalse(volumeApiServiceImpl.isOfflineRbdMoveWithinCephCluster(HypervisorType.KVM, rbdPool("vm-images"), rbdPool("vm-images")));
+    }
+
+    @Test
+    public void isOfflineRbdMoveWithinCephClusterNotToAnotherCluster() {
+        StoragePoolVO destPool = rbdPool("vm-images-ec");
+        Mockito.when(destPool.getHostAddress()).thenReturn("10.0.0.2");
+        Assert.assertFalse(volumeApiServiceImpl.isOfflineRbdMoveWithinCephCluster(HypervisorType.KVM, rbdPool("vm-images"), destPool));
+    }
+
+    @Test
+    public void isOfflineRbdMoveWithinCephClusterNotWithAnotherCephUser() {
+        StoragePoolVO destPool = rbdPool("vm-images-ec");
+        Mockito.when(destPool.getUserInfo()).thenReturn("other:secret");
+        Assert.assertFalse(volumeApiServiceImpl.isOfflineRbdMoveWithinCephCluster(HypervisorType.KVM, rbdPool("vm-images"), destPool));
+    }
+
+    @Test
+    public void isOfflineRbdMoveWithinCephClusterNotForAManagedPool() {
+        StoragePoolVO destPool = rbdPool("vm-images-ec");
+        Mockito.when(destPool.isManaged()).thenReturn(true);
+        Assert.assertFalse(volumeApiServiceImpl.isOfflineRbdMoveWithinCephCluster(HypervisorType.KVM, rbdPool("vm-images"), destPool));
+    }
+
+    @Test
+    public void isOfflineRbdMoveWithinCephClusterNotFromAnotherPoolType() {
+        StoragePoolVO srcPool = rbdPool("vm-images");
+        Mockito.when(srcPool.getPoolType()).thenReturn(Storage.StoragePoolType.NetworkFilesystem);
+        Assert.assertFalse(volumeApiServiceImpl.isOfflineRbdMoveWithinCephCluster(HypervisorType.KVM, srcPool, rbdPool("vm-images-ec")));
+    }
 }

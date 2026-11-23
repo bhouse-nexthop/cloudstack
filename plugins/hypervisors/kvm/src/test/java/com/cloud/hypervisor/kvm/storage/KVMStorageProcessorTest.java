@@ -27,8 +27,11 @@ import com.cloud.exception.InternalErrorException;
 import com.cloud.hypervisor.kvm.resource.LibvirtComputingResource;
 import com.cloud.hypervisor.kvm.resource.LibvirtDomainXMLParser;
 import com.cloud.hypervisor.kvm.resource.LibvirtVMDef;
+import com.cloud.agent.api.Answer;
 import com.cloud.storage.Storage;
 import com.cloud.storage.Storage.StoragePoolType;
+import org.apache.cloudstack.utils.qemu.QemuImg.PhysicalDiskFormat;
+import org.apache.cloudstack.storage.to.PrimaryDataStoreTO;
 import com.cloud.storage.template.TemplateConstants;
 import com.cloud.utils.Pair;
 import com.cloud.utils.exception.CloudRuntimeException;
@@ -875,6 +878,44 @@ public class KVMStorageProcessorTest {
         VolumeObjectTO noPassphrase = volumeWithPassphrase(null);
         Assert.assertTrue(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), noPassphrase, noPassphrase,
                 mockRbdPool("vm-images"), mockRbdPool("vm-images-ec")));
+    }
+
+    private VolumeObjectTO rbdVolumeOnPool(String poolUuid) {
+        PrimaryDataStoreTO store = Mockito.mock(PrimaryDataStoreTO.class);
+        Mockito.lenient().when(store.getPoolType()).thenReturn(StoragePoolType.RBD);
+        Mockito.lenient().when(store.getUuid()).thenReturn(poolUuid);
+        VolumeObjectTO volume = plainVolume();
+        volume.setDataStore(store);
+        volume.setPath(RBD_IMAGE_NAME);
+        volume.setFormat(Storage.ImageFormat.RAW);
+        return volume;
+    }
+
+    @Test
+    public void copyVolumeFromPrimaryToPrimaryFailsWhenPrimaryOnlySnapshotsCannotBeKept() {
+        VolumeObjectTO srcVol = rbdVolumeOnPool("src-pool");
+        VolumeObjectTO destVol = rbdVolumeOnPool("dest-pool");
+        CopyCommand cmd = Mockito.mock(CopyCommand.class);
+        Mockito.when(cmd.getSrcTO()).thenReturn(srcVol);
+        Mockito.when(cmd.getDestTO()).thenReturn(destVol);
+        Map<String, String> options = new HashMap<>();
+        options.put(CopyCommand.VOLUME_MIGRATION, "true");
+        options.put(CopyCommand.KEEP_PRIMARY_SNAPSHOTS, "true");
+        Mockito.when(cmd.getOptions()).thenReturn(options);
+        KVMStoragePool srcPool = mockRbdPool("vm-images");
+        KVMStoragePool destPool = mockRbdPool("vm-images-ec");
+        // another Ceph cluster, so the image cannot be moved with rbd migration
+        Mockito.when(destPool.getSourceHost()).thenReturn("10.0.0.2");
+        Mockito.when(destPool.getDefaultFormat()).thenReturn(PhysicalDiskFormat.RAW);
+        Mockito.when(storagePoolManager.getPhysicalDisk(StoragePoolType.RBD, "src-pool", RBD_IMAGE_NAME))
+                .thenReturn(new KVMPhysicalDisk("vm-images/" + RBD_IMAGE_NAME, RBD_IMAGE_NAME, srcPool));
+        Mockito.when(storagePoolManager.getStoragePool(StoragePoolType.RBD, "dest-pool")).thenReturn(destPool);
+
+        Answer answer = storageProcessor.copyVolumeFromPrimaryToPrimary(cmd);
+
+        Assert.assertFalse(answer.getResult());
+        Assert.assertTrue(answer.getDetails().contains("snapshots that exist only on its primary storage"));
+        Mockito.verify(storagePoolManager, Mockito.never()).copyPhysicalDisk(Mockito.any(), Mockito.any(), Mockito.any(), Mockito.anyInt());
     }
 
     @Test

@@ -30,6 +30,12 @@ public class CopyCommand extends StorageSubSystemCommand {
      */
     public static final String VOLUME_MIGRATION = "volumeMigration";
 
+    /**
+     * Option set when the volume has snapshots that exist only on its primary storage. The copy
+     * must keep them with the volume, or fail.
+     */
+    public static final String KEEP_PRIMARY_SNAPSHOTS = "keepPrimarySnapshots";
+
     private DataTO srcTO;
     private DataTO destTO;
     private DataTO cacheTO;

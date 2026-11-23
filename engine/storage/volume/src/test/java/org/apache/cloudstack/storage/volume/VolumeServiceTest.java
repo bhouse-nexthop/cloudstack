@@ -405,16 +405,20 @@ public class VolumeServiceTest extends TestCase{
         onSourcePool.setInstallPath("vm-images/image/snap");
         SnapshotDataStoreVO onOtherPool = new SnapshotDataStoreVO(30L, 6L);
         onOtherPool.setInstallPath("other/image/snap");
+        onOtherPool.setVolumeId(1L);
         Mockito.when(snapshotDataStoreDaoMock.listAllByVolumeAndDataStore(1L, DataStoreRole.Primary)).thenReturn(Arrays.asList(onSourcePool, onOtherPool));
 
         volumeServiceImplSpy.moveRbdSnapshotsWithMigratedVolume(srcVolume, destVolume, copyAnswer("image"));
 
         Assert.assertEquals(20L, onSourcePool.getDataStoreId());
-        Assert.assertEquals(Long.valueOf(2L), onSourcePool.getVolumeId());
         Assert.assertEquals("vm-images-ec/image/snap", onSourcePool.getInstallPath());
+        Assert.assertEquals(Long.valueOf(2L), onSourcePool.getVolumeId());
         Mockito.verify(snapshotDataStoreDaoMock).update(100L, onSourcePool);
         Assert.assertEquals(30L, onOtherPool.getDataStoreId());
         Assert.assertEquals("other/image/snap", onOtherPool.getInstallPath());
+        Assert.assertEquals(Long.valueOf(1L), onOtherPool.getVolumeId());
+        Mockito.verify(snapshotDataStoreDaoMock, Mockito.never()).update(Mockito.anyLong(), Mockito.eq(onOtherPool));
+        Mockito.verify(snapshotDataStoreDaoMock, Mockito.never()).updateVolumeIds(Mockito.anyLong(), Mockito.anyLong());
     }
 
     @Test
