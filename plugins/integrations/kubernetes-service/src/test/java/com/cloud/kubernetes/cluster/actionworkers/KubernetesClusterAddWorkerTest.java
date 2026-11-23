@@ -16,6 +16,7 @@
 // under the License.
 package com.cloud.kubernetes.cluster.actionworkers;
 
+import java.io.File;
 import java.util.List;
 import java.util.Set;
 
@@ -23,8 +24,10 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentMatchers;
 import org.mockito.InOrder;
 import org.mockito.Mock;
+import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -44,8 +47,11 @@ import com.cloud.network.rules.FirewallRuleVO;
 import com.cloud.network.rules.PortForwardingRuleVO;
 import com.cloud.network.rules.RulesService;
 import com.cloud.network.rules.dao.PortForwardingRulesDao;
+import com.cloud.uservm.UserVm;
+import com.cloud.utils.Pair;
 import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.utils.net.Ip;
+import com.cloud.utils.ssh.SshHelper;
 
 @RunWith(MockitoJUnitRunner.class)
 public class KubernetesClusterAddWorkerTest {
@@ -72,6 +78,10 @@ public class KubernetesClusterAddWorkerTest {
     private IpAddress publicIp;
     @Mock
     private KubernetesClusterVmMapDao kubernetesClusterVmMapDao;
+    @Mock
+    private UserVm userVm;
+
+    private final File pkFile = new File("/dev/null");
 
     private KubernetesClusterAddWorker worker;
 
@@ -84,8 +94,8 @@ public class KubernetesClusterAddWorkerTest {
         worker.rulesService = rulesService;
         worker.kubernetesClusterVmMapDao = kubernetesClusterVmMapDao;
         Mockito.lenient().when(publicIp.getAddress()).thenReturn(new Ip("192.0.2.10"));
-        Mockito.when(publicIp.getId()).thenReturn(IP_ID);
-        Mockito.when(network.getVpcId()).thenReturn(null);
+        Mockito.lenient().when(publicIp.getId()).thenReturn(IP_ID);
+        Mockito.lenient().when(network.getVpcId()).thenReturn(null);
     }
 
     private PortForwardingRuleVO pfRule(long id, long ipId, int sourcePort, int destPort) {
@@ -406,5 +416,73 @@ public class KubernetesClusterAddWorkerTest {
 
         Assert.assertTrue(e.getMessage().contains("uuid-1 (PortForwarding, ports 2224-2224)"));
         Mockito.verifyNoInteractions(rulesService, firewallService);
+    }
+
+    @Test
+    public void getNodeProvisioningResetCommandClearsMarkerAndKubeadmState() {
+        Mockito.when(userVm.getUuid()).thenReturn("vm-uuid");
+        Assert.assertEquals("sudo rm -rf /var/lib/cloud/instances/vm-uuid/sem/* && sudo rm -f /home/cloud/success && " +
+                "{ sudo systemctl stop deploy-kube-system 2>/dev/null; " +
+                "sudo umount /mnt/k8sdisk 2>/dev/null; mountpoint -q /mnt/k8sdisk || sudo rm -rf /mnt/k8sdisk; sudo rm -rf /aux-dwnld; " +
+                "sudo systemctl disable --now kubelet 2>/dev/null; " +
+                "if PATH=$PATH:/opt/bin command -v kubeadm >/dev/null; then " +
+                "sudo env PATH=$PATH:/opt/bin kubeadm reset -f; fi; }",
+                worker.getNodeProvisioningResetCommand(userVm));
+    }
+
+    private KubernetesClusterAddWorker resetWorker() {
+        Mockito.when(userVm.getUuid()).thenReturn("vm-uuid");
+        KubernetesClusterAddWorker spy = Mockito.spy(worker);
+        Mockito.doReturn("cloud").when(spy).getControlNodeLoginUser();
+        return spy;
+    }
+
+    private void verifyResetCommandRun(KubernetesClusterAddWorker spy, MockedStatic<SshHelper> sshHelper) {
+        String command = spy.getNodeProvisioningResetCommand(userVm);
+        sshHelper.verify(() -> SshHelper.sshExecute(ArgumentMatchers.eq("192.0.2.10"), ArgumentMatchers.eq(2222),
+                ArgumentMatchers.eq("cloud"), ArgumentMatchers.eq(pkFile), ArgumentMatchers.isNull(),
+                ArgumentMatchers.eq(command),
+                ArgumentMatchers.anyInt(), ArgumentMatchers.anyInt(), ArgumentMatchers.anyInt()));
+    }
+
+    private void stubSsh(MockedStatic<SshHelper> sshHelper, Object result) {
+        org.mockito.stubbing.OngoingStubbing<Pair<Boolean, String>> stub = sshHelper.when(() -> SshHelper.sshExecute(ArgumentMatchers.anyString(),
+                ArgumentMatchers.anyInt(), ArgumentMatchers.any(), ArgumentMatchers.any(), ArgumentMatchers.any(), ArgumentMatchers.anyString(),
+                ArgumentMatchers.anyInt(), ArgumentMatchers.anyInt(), ArgumentMatchers.anyInt()));
+        if (result instanceof RuntimeException) {
+            stub.thenThrow((RuntimeException) result);
+        } else {
+            stub.thenReturn((Pair<Boolean, String>) result);
+        }
+    }
+
+    @Test
+    public void resetNodeProvisioningStateRunsResetCommand() {
+        KubernetesClusterAddWorker spy = resetWorker();
+        try (MockedStatic<SshHelper> sshHelper = Mockito.mockStatic(SshHelper.class)) {
+            stubSsh(sshHelper, new Pair<>(true, ""));
+            spy.resetNodeProvisioningState(userVm, publicIp, pkFile, 2222);
+            verifyResetCommandRun(spy, sshHelper);
+        }
+    }
+
+    @Test
+    public void resetNodeProvisioningStateToleratesUnreachableNode() {
+        KubernetesClusterAddWorker spy = resetWorker();
+        try (MockedStatic<SshHelper> sshHelper = Mockito.mockStatic(SshHelper.class)) {
+            stubSsh(sshHelper, new RuntimeException("unreachable"));
+            spy.resetNodeProvisioningState(userVm, publicIp, pkFile, 2222);
+            verifyResetCommandRun(spy, sshHelper);
+        }
+    }
+
+    @Test
+    public void resetNodeProvisioningStateToleratesCommandFailure() {
+        KubernetesClusterAddWorker spy = resetWorker();
+        try (MockedStatic<SshHelper> sshHelper = Mockito.mockStatic(SshHelper.class)) {
+            stubSsh(sshHelper, new Pair<>(false, "kubeadm failed"));
+            spy.resetNodeProvisioningState(userVm, publicIp, pkFile, 2222);
+            verifyResetCommandRun(spy, sshHelper);
+        }
     }
 }
