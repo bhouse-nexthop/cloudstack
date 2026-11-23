@@ -2394,7 +2394,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         // Offering changes are refused in Alert. With no offerings, the worker only changes the size,
         // and doesn't apply the cluster offering to node types whose VMs use another one.
         Map<String, ServiceOffering> nodeToOfferingMap = KubernetesCluster.State.Alert.equals(kubernetesCluster.getState()) ? new HashMap<>() :
-                createNodeTypeToServiceOfferingMap(cmd.getServiceOfferingNodeTypeMap(), cmd.getServiceOfferingId(), kubernetesCluster);
+                createNodeTypeToServiceOfferingMap(cmd.getServiceOfferingNodeTypeMap(), cmd.getServiceOfferingId());
 
         String[] keys = getServiceUserKeys(kubernetesCluster);
         KubernetesClusterScaleWorker scaleWorker =
@@ -2414,15 +2414,14 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
     /**
      * Creates a map for the requested node type service offering
      * For the node type DEFAULT: Every node is scaled to the same offering
+     * Empty when no offering is requested, so no node is scaled to a different offering
      */
-    protected Map<String, ServiceOffering> createNodeTypeToServiceOfferingMap(Map<String, Long> idsMapping,
-                                                                              Long serviceOfferingId, KubernetesClusterVO kubernetesCluster) {
+    protected Map<String, ServiceOffering> createNodeTypeToServiceOfferingMap(Map<String, Long> idsMapping, Long serviceOfferingId) {
         Map<String, ServiceOffering> map = new HashMap<>();
         if (MapUtils.isEmpty(idsMapping)) {
-            ServiceOfferingVO offering = serviceOfferingId != null ?
-                    serviceOfferingDao.findById(serviceOfferingId) :
-                    serviceOfferingDao.findById(kubernetesCluster.getServiceOfferingId());
-            map.put(DEFAULT.name(), offering);
+            if (serviceOfferingId != null) {
+                map.put(DEFAULT.name(), serviceOfferingDao.findById(serviceOfferingId));
+            }
             return map;
         }
         for (String key : CLUSTER_NODES_TYPES_LIST) {
