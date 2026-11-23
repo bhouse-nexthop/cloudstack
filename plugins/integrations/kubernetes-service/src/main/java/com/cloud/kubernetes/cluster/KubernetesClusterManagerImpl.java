@@ -3779,6 +3779,11 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         if (validNodeIds.isEmpty()) {
             throw new CloudRuntimeException("No valid nodes found to be removed from the Kubernetes cluster");
         }
+        if (!isCommandSupported(kubernetesCluster, cmd.getActualCommandName())) {
+            throw new InvalidParameterValueException(String.format("%s is not supported for the Kubernetes cluster %s of type %s, use removeVirtualMachinesFromKubernetesCluster",
+                    cmd.getActualCommandName(), kubernetesCluster.getUuid(), kubernetesCluster.getClusterType()));
+        }
+        validateNodesRemovable(kubernetesCluster, validNodeIds);
         KubernetesClusterRemoveWorker removeWorker = new KubernetesClusterRemoveWorker(kubernetesCluster, KubernetesClusterManagerImpl.this);
         removeWorker = ComponentContext.inject(removeWorker);
         return removeWorker.removeNodesFromCluster(validNodeIds);
@@ -3922,6 +3927,28 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
     protected String getHostName(Long hostId) {
         HostVO host = hostDao.findById(hostId);
         return host != null ? host.getName() : String.valueOf(hostId);
+    }
+
+    protected void validateNodesRemovable(KubernetesCluster cluster, List<Long> nodeIds) {
+        Map<Long, KubernetesClusterVmMapVO> clusterNodes = kubernetesClusterVmMapDao.listByClusterIdAndVmIdsIn(cluster.getId(), nodeIds)
+                .stream().collect(Collectors.toMap(KubernetesClusterVmMapVO::getVmId, map -> map, (first, second) -> first));
+        for (Long id : nodeIds) {
+            KubernetesClusterVmMapVO clusterNode = clusterNodes.get(id);
+            if (clusterNode != null && clusterNode.isExternalNode() && !clusterNode.isControlNode() && !clusterNode.isEtcdNode()) {
+                continue;
+            }
+            VMInstanceVO node = vmInstanceDao.findById(id);
+            String nodeName = node != null ? node.getUuid() : String.valueOf(id);
+            if (clusterNode == null) {
+                throw new InvalidParameterValueException(String.format("VM %s is not a node of the Kubernetes cluster %s", nodeName, cluster.getUuid()));
+            }
+            if (clusterNode.isControlNode() || clusterNode.isEtcdNode()) {
+                throw new InvalidParameterValueException(String.format("VM %s is %s node of the Kubernetes cluster %s and cannot be removed",
+                        nodeName, clusterNode.isControlNode() ? "a control" : "an etcd", cluster.getUuid()));
+            }
+            throw new InvalidParameterValueException(String.format("VM %s is a CKS-managed worker of the Kubernetes cluster %s, use scaleKubernetesCluster to remove it",
+                    nodeName, cluster.getUuid()));
+        }
     }
 
     @Override
