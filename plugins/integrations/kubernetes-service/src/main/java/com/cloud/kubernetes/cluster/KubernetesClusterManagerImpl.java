@@ -88,9 +88,11 @@ import org.apache.cloudstack.api.command.user.firewall.UpdateFirewallRuleCmd;
 import org.apache.cloudstack.api.command.user.job.QueryAsyncJobResultCmd;
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.AddNodesToKubernetesClusterCmd;
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.AddVirtualMachinesToKubernetesClusterCmd;
+import org.apache.cloudstack.api.command.user.kubernetes.cluster.ApplyKubernetesClusterMigrationsCmd;
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.CreateKubernetesClusterCmd;
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.DeleteKubernetesClusterCmd;
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.GetKubernetesClusterConfigCmd;
+import org.apache.cloudstack.api.command.user.kubernetes.cluster.ListKubernetesClusterMigrationsCmd;
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.ListKubernetesClustersCmd;
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.RemoveNodesFromKubernetesClusterCmd;
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.RemoveVirtualMachinesFromKubernetesClusterCmd;
@@ -123,6 +125,7 @@ import org.apache.cloudstack.api.command.user.volume.DetachVolumeCmd;
 import org.apache.cloudstack.api.command.user.volume.ListVolumesCmd;
 import org.apache.cloudstack.api.command.user.volume.ResizeVolumeCmd;
 import org.apache.cloudstack.api.response.KubernetesClusterConfigResponse;
+import org.apache.cloudstack.api.response.KubernetesClusterMigrationResponse;
 import org.apache.cloudstack.api.response.KubernetesClusterResponse;
 import org.apache.cloudstack.api.response.KubernetesUserVmResponse;
 import org.apache.cloudstack.api.response.ListResponse;
@@ -197,9 +200,14 @@ import com.cloud.kubernetes.cluster.utils.KubernetesClusterCertificateUtil;
 import com.cloud.kubernetes.cluster.utils.KubernetesClusterCertificateUtil.CertificateExpiry;
 import com.cloud.kubernetes.cluster.utils.KubernetesClusterCertificateUtil.CertificateExpiryReport;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterAffinityGroupMapDao;
+import com.cloud.kubernetes.cluster.migrations.DynamicScalingMigration;
+import com.cloud.kubernetes.cluster.migrations.HeadlampMigration;
+import com.cloud.kubernetes.cluster.migrations.KubernetesClusterMigration;
+import com.cloud.kubernetes.cluster.migrations.NodeTypeSettingsMigration;
 import com.cloud.kubernetes.cluster.utils.KubernetesClusterUtil;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterDao;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterDetailsDao;
+import com.cloud.kubernetes.cluster.dao.KubernetesClusterMigrationDao;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterVmMapDao;
 import com.cloud.kubernetes.version.KubernetesSupportedVersion;
 import com.cloud.kubernetes.version.KubernetesSupportedVersionVO;
@@ -367,6 +375,8 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
     public KubernetesClusterDetailsDao kubernetesClusterDetailsDao;
     @Inject
     public KubernetesClusterAffinityGroupMapDao kubernetesClusterAffinityGroupMapDao;
+    @Inject
+    public KubernetesClusterMigrationDao kubernetesClusterMigrationDao;
     @Inject
     public KubernetesSupportedVersionDao kubernetesSupportedVersionDao;
     @Inject
@@ -1154,7 +1164,9 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
                         BaseCmd.getCommandNameByClass(RotateKubernetesClusterCertificatesCmd.class),
                         BaseCmd.getCommandNameByClass(AddNodesToKubernetesClusterCmd.class),
                         BaseCmd.getCommandNameByClass(RemoveNodesFromKubernetesClusterCmd.class),
-                        BaseCmd.getCommandNameByClass(UpdateKubernetesClusterCmd.class)
+                        BaseCmd.getCommandNameByClass(UpdateKubernetesClusterCmd.class),
+                        BaseCmd.getCommandNameByClass(ListKubernetesClusterMigrationsCmd.class),
+                        BaseCmd.getCommandNameByClass(ApplyKubernetesClusterMigrationsCmd.class)
                 ).contains(cmdName);
             case ExternalManaged:
                 return Arrays.asList(
@@ -2728,6 +2740,8 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         Transaction.execute(new TransactionCallbackNoReturn() {
             @Override
             public void doInTransactionWithoutResult(TransactionStatus status) {
+                // as the migrations of the cluster read them
+                kubernetesClusterDao.lockRow(clusterId, true);
                 kubernetesClusterAffinityGroupMapDao.removeByClusterId(clusterId);
                 persistAffinityGroupMappings(clusterId, affinityGroupNodeTypeMap);
                 syncVmAffinityGroups(clusterId, affinityGroupNodeTypeMap);
@@ -3195,7 +3209,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
      * own gets those its nodes all have, if any, so that a rollout does not take them away. Nothing changes for node
      * types that have their settings already.
      */
-    protected void convertToNodeTypeSettings(KubernetesClusterVO cluster) {
+    public void convertToNodeTypeSettings(KubernetesClusterVO cluster) {
         boolean hasEtcdNodes = cluster.getEtcdNodeCount() != null && cluster.getEtcdNodeCount() > 0;
         for (KubernetesClusterNodeType nodeType : hasEtcdNodes ? List.of(CONTROL, WORKER, ETCD) : List.of(CONTROL, WORKER)) {
             if (getNodeTypeServiceOfferingIdIfSet(cluster, nodeType) == null) {
@@ -3225,7 +3239,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         kubernetesClusterDao.update(cluster.getId(), cluster);
     }
 
-    protected Long getNodeTypeServiceOfferingIdIfSet(KubernetesCluster cluster, KubernetesClusterNodeType nodeType) {
+    public Long getNodeTypeServiceOfferingIdIfSet(KubernetesCluster cluster, KubernetesClusterNodeType nodeType) {
         if (CONTROL == nodeType) {
             return cluster.getControlNodeServiceOfferingId();
         }
@@ -3330,6 +3344,311 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         update.setCores(cores);
         update.setMemory(memory);
         kubernetesClusterDao.update(clusterId, update);
+    }
+
+    // migrations
+
+    protected static final String MIGRATIONS_LOCK = "KubernetesCluster.Migrations.Lock";
+    protected static final int MIGRATIONS_LOCK_TIMEOUT = 3;
+    protected static final String MIGRATION_APPLIED = "Applied";
+    protected static final String MIGRATION_PENDING = "Pending";
+    private List<KubernetesClusterMigration> migrations;
+
+    /**
+     * The migrations, in order: those of a scope are applied in this order, the database ones first, then the cluster
+     * ones, then the node ones in a single rolling pass. A new one goes at the end, with an ID never used before; one
+     * that needs code that is not there yet is added with that code.
+     */
+    protected List<KubernetesClusterMigration> createMigrations() {
+        return List.of(new NodeTypeSettingsMigration(this), new DynamicScalingMigration(this), new HeadlampMigration(this));
+    }
+
+    public synchronized List<KubernetesClusterMigration> getMigrations() {
+        if (migrations == null) {
+            migrations = createMigrations().stream().map(migration -> (KubernetesClusterMigration) ComponentContext.inject(migration)).collect(Collectors.toList());
+        }
+        return migrations;
+    }
+
+    public void markMigrationApplied(long clusterId, String migrationId) {
+        if (kubernetesClusterMigrationDao.findByClusterIdAndMigrationId(clusterId, migrationId) != null) {
+            return;
+        }
+        try {
+            kubernetesClusterMigrationDao.persist(new KubernetesClusterMigrationVO(clusterId, migrationId));
+        } catch (RuntimeException e) {
+            // recorded at the same time by another caller
+            if (kubernetesClusterMigrationDao.findByClusterIdAndMigrationId(clusterId, migrationId) == null) {
+                throw e;
+            }
+        }
+    }
+
+    protected Map<String, KubernetesClusterMigrationVO> getAppliedMigrations(long clusterId) {
+        return kubernetesClusterMigrationDao.listByClusterId(clusterId).stream()
+                .collect(Collectors.toMap(KubernetesClusterMigrationVO::getMigrationId, applied -> applied, (a, b) -> a));
+    }
+
+    /** Applies the pending database migrations of every CloudManaged cluster, as the management server starts */
+    public class KubernetesClusterMigrationRunner extends ManagedContextRunnable {
+        @Override
+        protected void runInContext() {
+            if (!KubernetesServiceEnabled.value()) {
+                return;
+            }
+            GlobalLock lock = GlobalLock.getInternLock(MIGRATIONS_LOCK);
+            try {
+                if (!lock.lock(MIGRATIONS_LOCK_TIMEOUT)) {
+                    logger.info("Not applying the database migrations of Kubernetes clusters, as another management server is applying them");
+                    return;
+                }
+                try {
+                    applyDatabaseMigrations();
+                } finally {
+                    lock.unlock();
+                }
+            } finally {
+                lock.releaseRef();
+            }
+        }
+    }
+
+    protected void applyDatabaseMigrations() {
+        for (KubernetesClusterVO cluster : kubernetesClusterDao.listAll()) {
+            if (!KubernetesCluster.ClusterType.CloudManaged.equals(cluster.getClusterType())) {
+                continue;
+            }
+            try {
+                applyDatabaseMigrations(cluster.getId());
+            } catch (Exception e) {
+                logger.warn("Failed to apply the database migrations of Kubernetes cluster {}", cluster, e);
+            }
+        }
+    }
+
+    /**
+     * Applies the pending database migrations of a cluster, in order, each with the cluster locked and recorded as it
+     * is applied. A cluster with an operation in progress, which may work from what they change, is left for later.
+     */
+    protected void applyDatabaseMigrations(long clusterId) {
+        Set<String> recorded = getAppliedMigrations(clusterId).keySet();
+        for (KubernetesClusterMigration migration : getMigrations()) {
+            if (migration.getScope() != KubernetesClusterMigration.Scope.DATABASE || recorded.contains(migration.getId())) {
+                continue;
+            }
+            boolean applied = Transaction.execute(new TransactionCallback<Boolean>() {
+                @Override
+                public Boolean doInTransaction(TransactionStatus status) {
+                    KubernetesClusterVO cluster = kubernetesClusterDao.lockRow(clusterId, true);
+                    if (cluster == null || cluster.getRemoved() != null) {
+                        return false;
+                    }
+                    if (kubernetesClusterMigrationDao.findByClusterIdAndMigrationId(clusterId, migration.getId()) != null) {
+                        return true;
+                    }
+                    if (OPERATION_STATES.contains(cluster.getState()) || KubernetesCluster.State.Destroying.equals(cluster.getState())
+                            || KubernetesCluster.State.Destroyed.equals(cluster.getState())) {
+                        logger.info("Not applying migration {} to Kubernetes cluster {} while it is {}", migration.getId(), cluster, cluster.getState());
+                        return false;
+                    }
+                    String reason = migration.checkPrecondition(cluster);
+                    if (reason != null) {
+                        logger.info("Not applying migration {} to Kubernetes cluster {}: {}", migration.getId(), cluster, reason);
+                        return false;
+                    }
+                    migration.applyToDatabase(cluster);
+                    if (!migration.verify(cluster, null)) {
+                        throw new CloudRuntimeException(String.format("Migration %s did not change Kubernetes cluster %s as expected", migration.getId(), cluster.getName()));
+                    }
+                    // no other caller records it while the cluster is locked
+                    kubernetesClusterMigrationDao.persist(new KubernetesClusterMigrationVO(clusterId, migration.getId()));
+                    logger.info("Applied migration {} to Kubernetes cluster {}", migration.getId(), cluster);
+                    return true;
+                }
+            });
+            if (!applied) {
+                return;
+            }
+        }
+    }
+
+    protected KubernetesClusterVO getMigratableCluster(Long clusterId, String cmdName, SecurityChecker.AccessType accessType) {
+        if (!KubernetesServiceEnabled.value()) {
+            logAndThrow(Level.ERROR, "Kubernetes Service plugin is disabled");
+        }
+        KubernetesClusterVO cluster = kubernetesClusterDao.findById(clusterId);
+        if (cluster == null || cluster.getRemoved() != null) {
+            throw new InvalidParameterValueException("Invalid Kubernetes cluster ID");
+        }
+        accountManager.checkAccess(CallContext.current().getCallingAccount(), accessType, false, cluster);
+        if (!isCommandSupported(cluster, cmdName)) {
+            throw new InvalidParameterValueException(String.format("Migrations are not supported for an externally managed cluster (%s)", cluster.getName()));
+        }
+        return cluster;
+    }
+
+    @Override
+    public ListResponse<KubernetesClusterMigrationResponse> listKubernetesClusterMigrations(ListKubernetesClusterMigrationsCmd cmd) {
+        KubernetesClusterVO cluster = getMigratableCluster(cmd.getId(), cmd.getActualCommandName(), SecurityChecker.AccessType.ListEntry);
+        Map<String, KubernetesClusterMigrationVO> applied = getAppliedMigrations(cluster.getId());
+        List<KubernetesClusterMigrationResponse> responses = new ArrayList<>();
+        for (KubernetesClusterMigration migration : getMigrations()) {
+            KubernetesClusterMigrationResponse response = new KubernetesClusterMigrationResponse();
+            response.setId(migration.getId());
+            response.setDescription(migration.getDescription());
+            response.setScope(migration.getScope().name());
+            response.setDisruptive(migration.isDisruptive());
+            KubernetesClusterMigrationVO record = applied.get(migration.getId());
+            response.setState(record == null ? MIGRATION_PENDING : MIGRATION_APPLIED);
+            if (record != null) {
+                response.setApplied(record.getApplied());
+            } else {
+                response.setUnmetPrecondition(getUnmetPrecondition(cluster, migration, applied.keySet()));
+            }
+            responses.add(response);
+        }
+        ListResponse<KubernetesClusterMigrationResponse> listResponse = new ListResponse<>();
+        listResponse.setResponses(responses, responses.size());
+        return listResponse;
+    }
+
+    /** What keeps a pending migration from being applied to the cluster now, or null */
+    protected String getUnmetPrecondition(KubernetesClusterVO cluster, KubernetesClusterMigration migration, Set<String> applied) {
+        String reason = checkMigrationPrecondition(cluster, migration);
+        if (reason != null) {
+            return reason;
+        }
+        KubernetesCluster.State state = cluster.getState();
+        if (migration.getScope() != KubernetesClusterMigration.Scope.DATABASE) {
+            for (KubernetesClusterMigration database : getMigrations()) {
+                // applied first by applyKubernetesClusterMigrations, unless something keeps it from it
+                String unmet = database.getScope() == KubernetesClusterMigration.Scope.DATABASE && !applied.contains(database.getId())
+                        ? getUnmetPrecondition(cluster, database, applied) : null;
+                if (unmet != null) {
+                    return String.format("the database migration %s, which comes first, can not be applied: %s", database.getId(), unmet);
+                }
+            }
+        }
+        if (migration.getScope() == KubernetesClusterMigration.Scope.DATABASE) {
+            return OPERATION_STATES.contains(state) || KubernetesCluster.State.Destroying.equals(state) || KubernetesCluster.State.Destroyed.equals(state)
+                    ? String.format("the cluster is %s", state) : null;
+        }
+        return KubernetesCluster.State.Running.equals(state) || KubernetesCluster.State.Alert.equals(state) ? null
+                : String.format("the cluster is %s, not Running or Alert", state);
+    }
+
+    /**
+     * The pending cluster and node migrations to apply, in their order: the requested ones, or all those whose
+     * precondition is met. None while a database migration is pending, as the others come after them.
+     */
+    protected List<KubernetesClusterMigration> selectMigrations(KubernetesClusterVO cluster, List<String> requested) {
+        Set<String> known = getMigrations().stream().map(KubernetesClusterMigration::getId).collect(Collectors.toSet());
+        for (String id : Objects.requireNonNullElse(requested, List.<String>of())) {
+            if (!known.contains(id)) {
+                throw new InvalidParameterValueException(String.format("Unknown migration %s, the migrations are %s", id, known));
+            }
+        }
+        Set<String> applied = getAppliedMigrations(cluster.getId()).keySet();
+        List<KubernetesClusterMigration> selected = new ArrayList<>();
+        for (KubernetesClusterMigration migration : getMigrations()) {
+            if (applied.contains(migration.getId())) {
+                continue;
+            }
+            if (migration.getScope() == KubernetesClusterMigration.Scope.DATABASE) {
+                // applied just before, unless something kept it from it; the others come after it
+                String reason = migration.checkPrecondition(cluster);
+                throw new InvalidParameterValueException(String.format("Migration %s can not be applied to Kubernetes cluster %s: %s", migration.getId(),
+                        cluster.getName(), reason != null ? reason : String.format("it is %s, or an earlier database migration is pending", cluster.getState())));
+            }
+            boolean named = CollectionUtils.isNotEmpty(requested);
+            if (named && !requested.contains(migration.getId())) {
+                continue;
+            }
+            String reason = checkMigrationPrecondition(cluster, migration);
+            if (reason != null && named) {
+                throw new InvalidParameterValueException(String.format("Migration %s can not be applied to Kubernetes cluster %s: %s", migration.getId(), cluster.getName(), reason));
+            }
+            if (reason != null) {
+                logger.info("Not applying migration {} to Kubernetes cluster {}: {}", migration.getId(), cluster, reason);
+                continue;
+            }
+            selected.add(migration);
+        }
+        return selected;
+    }
+
+    @Override
+    @ActionEvent(eventType = KubernetesClusterEventTypes.EVENT_KUBERNETES_CLUSTER_MIGRATE,
+            eventDescription = "applying migrations to Kubernetes cluster", async = true)
+    public boolean applyKubernetesClusterMigrations(ApplyKubernetesClusterMigrationsCmd cmd) throws CloudRuntimeException {
+        KubernetesClusterVO cluster = getMigratableCluster(cmd.getId(), cmd.getActualCommandName(), SecurityChecker.AccessType.OperateEntry);
+        if (cmd.getMaxUnavailable() != null && cmd.getMaxUnavailable() < 1) {
+            throw new InvalidParameterValueException(String.format("%s must be at least 1", ApiConstants.MAX_UNAVAILABLE));
+        }
+        try {
+            applyDatabaseMigrations(cluster.getId());
+        } catch (CloudRuntimeException e) {
+            throw new CloudRuntimeException(String.format("Failed to apply the database migrations of Kubernetes cluster %s: %s", cluster.getName(), e.getMessage()), e);
+        }
+        cluster = kubernetesClusterDao.findById(cluster.getId());
+        List<KubernetesClusterMigration> selected = selectMigrations(cluster, cmd.getMigrations());
+        if (selected.isEmpty()) {
+            logger.info("No migration to apply to Kubernetes cluster {}", cluster);
+            return true;
+        }
+        if (!KubernetesCluster.State.Running.equals(cluster.getState()) && !KubernetesCluster.State.Alert.equals(cluster.getState())) {
+            throw new InvalidParameterValueException(String.format("Migrations can only be applied to Kubernetes cluster %s while it is Running or Alert, it is %s",
+                    cluster.getName(), cluster.getState()));
+        }
+        KubernetesClusterRollingUpdateWorker worker = createRollingUpdateWorker(cluster, cmd.getMaxUnavailable() == null ? 1 : cmd.getMaxUnavailable());
+        worker.setMigrations(selected);
+        // once Updating, the settings of the node types can not change
+        worker.begin();
+        try {
+            checkMigrationRollout(kubernetesClusterDao.findById(cluster.getId()), selected);
+        } catch (RuntimeException e) {
+            worker.abort();
+            throw e;
+        }
+        worker.rollout();
+        // without a list, those that turn out not to apply yet, such as a cluster migration refused on the cluster, are
+        // left pending and told of by the last error of the cluster
+        Set<String> applied = getAppliedMigrations(cluster.getId()).keySet();
+        List<String> pending = selected.stream().map(KubernetesClusterMigration::getId).filter(id -> !applied.contains(id)).collect(Collectors.toList());
+        if (CollectionUtils.isNotEmpty(cmd.getMigrations()) && !pending.isEmpty()) {
+            KubernetesClusterDetailsVO lastError = kubernetesClusterDetailsDao.findDetail(cluster.getId(), ROLLOUT_LAST_ERROR_DETAIL);
+            throw new CloudRuntimeException(String.format("The migrations %s were not applied to Kubernetes cluster %s, the others were: %s", pending, cluster.getName(),
+                    lastError == null ? "see the management server log" : lastError.getValue()));
+        }
+        return true;
+    }
+
+    /**
+     * Checks, with the cluster Updating, what a rollout of migrations needs: the preconditions, which may have changed
+     * since they were checked, and, for node migrations, that no node it can restart differs from the settings of its
+     * type, as the rollout would restart it with them too
+     */
+    protected void checkMigrationRollout(KubernetesClusterVO cluster, List<KubernetesClusterMigration> selected) {
+        for (KubernetesClusterMigration migration : selected) {
+            String reason = checkMigrationPrecondition(cluster, migration);
+            if (reason != null) {
+                throw new InvalidParameterValueException(String.format("Migration %s can not be applied to Kubernetes cluster %s: %s", migration.getId(), cluster.getName(), reason));
+            }
+        }
+    }
+
+    /**
+     * The precondition of the migration, and, for a node migration, that no node the rollout can restart differs from
+     * the settings of its type, as the rollout would restart it with them too
+     */
+    protected String checkMigrationPrecondition(KubernetesClusterVO cluster, KubernetesClusterMigration migration) {
+        String reason = migration.checkPrecondition(cluster);
+        if (reason != null || migration.getScope() != KubernetesClusterMigration.Scope.NODE) {
+            return reason;
+        }
+        Set<KubernetesClusterNodeType> unrollable = getUnrollableNodeTypes(cluster);
+        return countOutOfDateNodes(cluster).entrySet().stream().anyMatch(entry -> entry.getValue() > 0 && !unrollable.contains(entry.getKey()))
+                ? "some nodes differ from the settings of their type, restart them with updateKubernetesCluster rollout=true first" : null;
     }
 
     private void updateNodeCount(KubernetesClusterVO kubernetesCluster) {
@@ -3690,6 +4009,8 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         cmdList.add(RemoveNodesFromKubernetesClusterCmd.class);
         cmdList.add(UpdateKubernetesClusterAffinityGroupCmd.class);
         cmdList.add(UpdateKubernetesClusterCmd.class);
+        cmdList.add(ListKubernetesClusterMigrationsCmd.class);
+        cmdList.add(ApplyKubernetesClusterMigrationsCmd.class);
         return cmdList;
     }
 
@@ -3935,6 +4256,12 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
                 // a rollout may have changed the offering of some nodes. Its nodes are left as they are: the next
                 // rollout takes up the ones it stopped or cordoned first
                 updateKubernetesClusterCapacity(clusterId);
+            }
+            // left out by the database migrations at startup while it was in that state
+            try {
+                applyDatabaseMigrations(clusterId);
+            } catch (Exception e) {
+                logger.warn("Failed to apply the database migrations of Kubernetes cluster {}", cluster, e);
             }
         }
     }
@@ -4298,6 +4625,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
 
         _gcExecutor.scheduleWithFixedDelay(new KubernetesClusterGarbageCollector(), 300, 300, TimeUnit.SECONDS);
         _stateScanner.scheduleWithFixedDelay(new KubernetesClusterStatusScanner(), 300, 30, TimeUnit.SECONDS);
+        _stateScanner.schedule(new KubernetesClusterMigrationRunner(), 0, TimeUnit.SECONDS);
         // Separate from the status scanner: SSH checks of many clusters take a while and must not hold up its 30s passes
         _certificateScanner.scheduleWithFixedDelay(new KubernetesClusterCertificateScanner(), 600, CERTIFICATE_SCANNER_INTERVAL_SECONDS, TimeUnit.SECONDS);
 

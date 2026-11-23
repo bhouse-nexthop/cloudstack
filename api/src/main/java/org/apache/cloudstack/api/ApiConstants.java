@@ -1341,6 +1341,8 @@ public class ApiConstants {
     public static final String ROLLOUT = "rollout";
     public static final String CANCEL_ROLLOUT = "cancelrollout";
     public static final String MAX_UNAVAILABLE = "maxunavailable";
+    public static final String DISRUPTIVE = "disruptive";
+    public static final String UNMET_PRECONDITION = "unmetprecondition";
     public static final String CONTROL_AFFINITY_GROUP_IDS = "controlaffinitygroupids";
     public static final String CONTROL_AFFINITY_GROUP_NAMES = "controlaffinitygroupnames";
     public static final String WORKER_AFFINITY_GROUP_IDS = "workeraffinitygroupids";

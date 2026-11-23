@@ -23,9 +23,11 @@ import org.apache.cloudstack.api.command.user.kubernetes.cluster.AddNodesToKuber
 import java.util.List;
 
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.AddVirtualMachinesToKubernetesClusterCmd;
+import org.apache.cloudstack.api.command.user.kubernetes.cluster.ApplyKubernetesClusterMigrationsCmd;
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.CreateKubernetesClusterCmd;
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.DeleteKubernetesClusterCmd;
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.GetKubernetesClusterConfigCmd;
+import org.apache.cloudstack.api.command.user.kubernetes.cluster.ListKubernetesClusterMigrationsCmd;
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.ListKubernetesClustersCmd;
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.RemoveNodesFromKubernetesClusterCmd;
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.RemoveVirtualMachinesFromKubernetesClusterCmd;
@@ -37,6 +39,7 @@ import org.apache.cloudstack.api.command.user.kubernetes.cluster.UpdateKubernete
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.UpdateKubernetesClusterCmd;
 import org.apache.cloudstack.api.command.user.kubernetes.cluster.UpgradeKubernetesClusterCmd;
 import org.apache.cloudstack.api.response.KubernetesClusterConfigResponse;
+import org.apache.cloudstack.api.response.KubernetesClusterMigrationResponse;
 import org.apache.cloudstack.api.response.KubernetesClusterResponse;
 import org.apache.cloudstack.api.response.ListResponse;
 import org.apache.cloudstack.api.response.RemoveVirtualMachinesFromKubernetesClusterResponse;
@@ -257,6 +260,10 @@ public interface KubernetesClusterService extends PluggableService, Configurable
     boolean updateKubernetesClusterAffinityGroups(UpdateKubernetesClusterAffinityGroupCmd cmd) throws CloudRuntimeException;
 
     boolean updateKubernetesCluster(UpdateKubernetesClusterCmd cmd) throws CloudRuntimeException;
+
+    ListResponse<KubernetesClusterMigrationResponse> listKubernetesClusterMigrations(ListKubernetesClusterMigrationsCmd cmd);
+
+    boolean applyKubernetesClusterMigrations(ApplyKubernetesClusterMigrationsCmd cmd) throws CloudRuntimeException;
 
     boolean addVmsToCluster(AddVirtualMachinesToKubernetesClusterCmd cmd);
 
