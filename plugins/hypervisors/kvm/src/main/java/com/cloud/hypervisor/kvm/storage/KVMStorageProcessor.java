@@ -3464,7 +3464,8 @@ public class KVMStorageProcessor implements StorageProcessor {
             KVMPhysicalDisk newVolume;
             String destVolumeName;
             destPool = storagePoolMgr.getStoragePool(destPrimaryStore.getPoolType(), destPrimaryStore.getUuid());
-            final boolean rbdMigration = canMigrateRbdImage(cmd, srcVol, destVol, volume.getPool(), destPool);
+            final boolean rbdMigration = !srcPrimaryStore.isManaged() && !destPrimaryStore.isManaged()
+                    && canMigrateRbdImage(cmd, srcVol, destVol, volume.getPool(), destPool);
             if (destPrimaryStore.isManaged()) {
                 if (!storagePoolMgr.connectPhysicalDisk(destPrimaryStore.getPoolType(), destPrimaryStore.getUuid(), destVolumePath, destPrimaryStore.getDetails())) {
                     logger.warn("Failed to connect dest volume {}, in storage pool {}", destVol, destPrimaryStore);
@@ -3541,7 +3542,7 @@ public class KVMStorageProcessor implements StorageProcessor {
      */
     protected boolean canMigrateRbdImage(CopyCommand cmd, VolumeObjectTO srcVol, VolumeObjectTO destVol, KVMStoragePool srcPool, KVMStoragePool destPool) {
         return cmd.getOptions() != null && Boolean.parseBoolean(cmd.getOptions().get(CopyCommand.VOLUME_MIGRATION))
-                && srcVol.getPassphrase() == null && destVol.getPassphrase() == null
+                && !srcVol.requiresEncryption() && !destVol.requiresEncryption()
                 && srcPool.getType() == StoragePoolType.RBD && destPool.getType() == StoragePoolType.RBD
                 && srcPool.getAuthUserName() != null
                 && Objects.equals(srcPool.getSourceHost(), destPool.getSourceHost())

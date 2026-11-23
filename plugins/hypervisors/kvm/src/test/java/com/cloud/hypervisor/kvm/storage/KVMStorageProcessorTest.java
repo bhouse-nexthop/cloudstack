@@ -809,6 +809,17 @@ public class KVMStorageProcessorTest {
         return pool;
     }
 
+    /** An unencrypted volume as the management server sends it: an empty passphrase, not null. */
+    private VolumeObjectTO plainVolume() {
+        return volumeWithPassphrase(new byte[0]);
+    }
+
+    private VolumeObjectTO volumeWithPassphrase(byte[] passphrase) {
+        VolumeObjectTO volume = new VolumeObjectTO();
+        volume.setPassphrase(passphrase);
+        return volume;
+    }
+
     private CopyCommand mockCopyCommand(boolean volumeMigration) {
         CopyCommand cmd = Mockito.mock(CopyCommand.class);
         Map<String, String> options = new HashMap<>();
@@ -821,34 +832,48 @@ public class KVMStorageProcessorTest {
 
     @Test
     public void canMigrateRbdImageBetweenPoolsOfTheSameCluster() {
-        Assert.assertTrue(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), volumeObjectToMock, volumeObjectToMock,
+        VolumeObjectTO plain = plainVolume();
+        Assert.assertTrue(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), plain, plain,
                 mockRbdPool("vm-images"), mockRbdPool("vm-images-ec")));
     }
 
     @Test
     public void canMigrateRbdImageNotWhenTheCopyIsNotAMove() {
-        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(false), volumeObjectToMock, volumeObjectToMock,
+        VolumeObjectTO plain = plainVolume();
+        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(false), plain, plain,
                 mockRbdPool("vm-images"), mockRbdPool("vm-images-ec")));
     }
 
     @Test
     public void canMigrateRbdImageNotIntoTheSameCephPool() {
-        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), volumeObjectToMock, volumeObjectToMock,
+        VolumeObjectTO plain = plainVolume();
+        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), plain, plain,
                 mockRbdPool("vm-images"), mockRbdPool("vm-images")));
     }
 
     @Test
     public void canMigrateRbdImageNotToAnotherCluster() {
+        VolumeObjectTO plain = plainVolume();
         KVMStoragePool destPool = mockRbdPool("vm-images-ec");
         Mockito.when(destPool.getSourceHost()).thenReturn("10.0.0.2");
-        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), volumeObjectToMock, volumeObjectToMock,
+        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), plain, plain,
                 mockRbdPool("vm-images"), destPool));
     }
 
     @Test
     public void canMigrateRbdImageNotForAnEncryptedVolume() {
-        Mockito.when(volumeObjectToMock.getPassphrase()).thenReturn("passphrase".getBytes());
-        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), volumeObjectToMock, volumeObjectToMock,
+        VolumeObjectTO plain = plainVolume();
+        VolumeObjectTO encrypted = volumeWithPassphrase("passphrase".getBytes());
+        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), encrypted, plain,
+                mockRbdPool("vm-images"), mockRbdPool("vm-images-ec")));
+        Assert.assertFalse(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), plain, encrypted,
+                mockRbdPool("vm-images"), mockRbdPool("vm-images-ec")));
+    }
+
+    @Test
+    public void canMigrateRbdImageWhenThePassphraseIsNull() {
+        VolumeObjectTO noPassphrase = volumeWithPassphrase(null);
+        Assert.assertTrue(storageProcessor.canMigrateRbdImage(mockCopyCommand(true), noPassphrase, noPassphrase,
                 mockRbdPool("vm-images"), mockRbdPool("vm-images-ec")));
     }
 
