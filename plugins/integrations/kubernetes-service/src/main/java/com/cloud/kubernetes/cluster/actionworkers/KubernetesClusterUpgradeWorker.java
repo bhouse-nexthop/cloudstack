@@ -21,6 +21,7 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
@@ -69,10 +70,9 @@ public class KubernetesClusterUpgradeWorker extends KubernetesClusterActionWorke
         upgradeScriptFile = retrieveScriptFile(upgradeScriptFilename);
     }
 
-    private Pair<Boolean, String> runInstallScriptOnVM(final UserVm vm, final int index) throws Exception {
-        Pair<String, Integer> nodeSshAddress = getNodeSshAddress(vm, index);
-        String nodeAddress = nodeSshAddress.first();
-        int nodeSshPort = nodeSshAddress.second();
+    private Pair<Boolean, String> runInstallScriptOnVM(final UserVm vm, final int index, final Pair<String, Integer> nodeSshIpPort) throws Exception {
+        String nodeAddress = nodeSshIpPort.first();
+        int nodeSshPort = nodeSshIpPort.second();
         SshHelper.scpTo(nodeAddress, nodeSshPort, getControlNodeLoginUser(), sshKeyFile, null,
                 "~/", upgradeScriptFile.getAbsolutePath(), "0755");
         String cmdStr = String.format("sudo ./%s %s %s %s %s %s",
@@ -86,7 +86,7 @@ public class KubernetesClusterUpgradeWorker extends KubernetesClusterActionWorke
                 10000, 10000, 10 * 60 * 1000);
     }
 
-    protected void upgradeKubernetesClusterNodes() {
+    protected void upgradeKubernetesClusterNodes(Map<Long, Pair<String, Integer>> nodeSshIpPorts) {
         for (int i = 0; i < clusterVMs.size(); ++i) {
             UserVm vm = clusterVMs.get(i);
             String hostName = getNodeName(vm);
@@ -121,7 +121,7 @@ public class KubernetesClusterUpgradeWorker extends KubernetesClusterActionWorke
             for (int retry = KubernetesClusterService.KubernetesClusterUpgradeRetries.value(); retry >= 0; retry--) {
                 try {
                     deployProvider();
-                    result = runInstallScriptOnVM(vm, i);
+                    result = runInstallScriptOnVM(vm, i, nodeSshIpPorts.get(vm.getId()));
                     if (result.first()) {
                         break;
                     }
@@ -238,13 +238,14 @@ public class KubernetesClusterUpgradeWorker extends KubernetesClusterActionWorke
             logAndThrow(Level.ERROR, String.format("Upgrade failed for Kubernetes cluster: %s, unable to retrieve VMs for cluster", kubernetesCluster));
         }
         filterOutManualUpgradeNodesFromClusterUpgrade();
+        Map<Long, Pair<String, Integer>> nodeSshIpPorts = resolveNodeSshIpPorts();
         retrieveScriptFiles();
         transitToOperationState(KubernetesCluster.Event.UpgradeRequested);
         // Kept until the cluster is Running again (see stateTransitTo), so that a failed upgrade can be told apart
         // from other causes of Alert
         kubernetesClusterDetailsDao.addDetail(kubernetesCluster.getId(), UPGRADE_VERSION_DETAIL, String.valueOf(upgradeVersion.getId()), false);
         attachIsoKubernetesVMs(clusterVMs, upgradeVersion);
-        upgradeKubernetesClusterNodes();
+        upgradeKubernetesClusterNodes(nodeSshIpPorts);
         detachIsoKubernetesVMs(clusterVMs);
         KubernetesClusterVO kubernetesClusterVO = kubernetesClusterDao.findById(kubernetesCluster.getId());
         kubernetesClusterVO.setKubernetesVersionId(upgradeVersion.getId());
@@ -273,6 +274,15 @@ public class KubernetesClusterUpgradeWorker extends KubernetesClusterActionWorke
             }
         } catch (Exception e) {
             logger.warn("Unable to refresh the stored kubeconfig of Kubernetes cluster {} after the upgrade", kubernetesCluster, e);
+        }
+    }
+
+    protected Map<Long, Pair<String, Integer>> resolveNodeSshIpPorts() {
+        try {
+            return getClusterNodesSshIpPorts(clusterVMs);
+        } catch (CloudRuntimeException e) {
+            logAndThrow(Level.ERROR, String.format("Upgrade failed for Kubernetes cluster: %s, %s", kubernetesCluster, e.getMessage()), e);
+            return null;
         }
     }
 
