@@ -59,12 +59,13 @@ import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
 
@@ -100,6 +101,10 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
             // rendered once the join token exists, as it is part of the user data
             String base64UserData = getNodeUserData(getControlVmPrivateIp(), mountCksIsoOnVr);
             removeLeftoverNodeSshRules(network, publicIp, nodeIds);
+            if (Objects.isNull(getFreeNodeSshPort(network, publicIp))) {
+                throw new CloudRuntimeException(String.format("No free port left on public IP %s for SSH to new nodes of Kubernetes cluster %s",
+                        publicIp.getAddress().addr(), kubernetesCluster.getName()));
+            }
             attachCksIsoForNodesAdditionToCluster(nodeIds, kubernetesCluster.getId(), mountCksIsoOnVr);
             Ternary<Integer, Long, Long> nodesAddedAndMemory = importNodeToCluster(nodeIds, network, publicIp, base64UserData);
             int nodesAdded = nodesAddedAndMemory.first();
@@ -254,7 +259,12 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
 
     protected Pair<Boolean, Integer> validateAndSetupNode(Network network, IpAddress publicIp, Account account,
                                    Long nodeId, int nodeIndex, String base64UserData) {
-        int sshStartPort = getNodeSshStartPort() + nodeIndex;
+        Integer sshStartPort = getFreeNodeSshPort(network, publicIp);
+        if (Objects.isNull(sshStartPort)) {
+            logger.error(String.format("Failed to add node %s to Kubernetes cluster %s: no free port left on public IP %s for SSH to it",
+                    nodeId, kubernetesCluster.getName(), publicIp.getAddress().addr()));
+            return new Pair<>(false, nodeIndex);
+        }
         Set<Long> preExistingRuleIds = listNodeSshRuleIds(network, publicIp, nodeId, sshStartPort);
         try {
             if (Objects.isNull(network.getVpcId())) {
@@ -354,68 +364,54 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
         }
     }
 
-    private int getNodeSshStartPort() {
-        return CLUSTER_NODES_DEFAULT_START_SSH_PORT + (int) kubernetesCluster.getTotalNodeCount() - kubernetesCluster.getEtcdNodeCount().intValue();
-    }
-
     /**
-     * Checks the SSH ports the new nodes will use before anything is created. A port-forwarding rule of the shape
-     * CKS creates for a VM in this request that is in no cluster yet, plus the 0.0.0.0/0 firewall rule on the same
-     * port, is a leftover of an earlier failed add-node and is removed. Any other rule that would clash with the
-     * node's SSH rules may belong to the user, so the add fails without touching it.
+     * Removes SSH rules left by an earlier failed add-node: a port-forwarding rule of the shape CKS creates (tcp, open
+     * to all, one port from CLUSTER_NODES_DEFAULT_START_SSH_PORT up on the cluster IP, to port 22) to a VM in this
+     * request that is in no cluster. On isolated networks the firewall rule on that port goes too, if it is exactly
+     * tcp 0.0.0.0/0 with no destination CIDRs and no other rule on the IP forwards that port. Other rules are left
+     * alone; the port picker skips their ports.
      */
     protected void removeLeftoverNodeSshRules(Network network, IpAddress publicIp, List<Long> nodeIds) {
-        int startPort = getNodeSshStartPort();
-        int endPort = startPort + nodeIds.size() - 1;
-        List<FirewallRuleVO> rules = firewallRulesDao.listByIpAndPurposeAndNotRevoked(publicIp.getId(), null).stream()
-                .filter(rule -> NetUtils.TCP_PROTO.equalsIgnoreCase(rule.getProtocol()) && Objects.nonNull(rule.getSourcePortStart())
-                        && Objects.nonNull(rule.getSourcePortEnd()) && Math.max(startPort, rule.getSourcePortStart()) <= Math.min(endPort, rule.getSourcePortEnd())
-                        && clashesWithNodeSshRules(network, rule))
-                .collect(Collectors.toList());
-        if (rules.isEmpty()) {
+        List<FirewallRuleVO> leftovers = new ArrayList<>();
+        for (Long nodeId : nodeIds) {
+            if (isInAnyCluster(nodeId)) {
+                continue;
+            }
+            portForwardingRulesDao.listByVm(nodeId).stream()
+                    .filter(pfRule -> Objects.equals(pfRule.getSourceIpAddressId(), publicIp.getId())
+                            && hasNodeSshPfShape(pfRule) && pfRule.getSourcePortStart() >= CLUSTER_NODES_DEFAULT_START_SSH_PORT
+                            && isOpenToAll(pfRule))
+                    .forEach(leftovers::add);
+        }
+        if (leftovers.isEmpty()) {
             return;
         }
-        List<FirewallRuleVO> leftovers = new ArrayList<>();
         List<FirewallRuleVO> leftoverFirewallRules = new ArrayList<>();
-        Set<Integer> leftoverPorts = new HashSet<>();
-        Set<Long> clusterNodeRuleIds = new HashSet<>();
-        for (FirewallRuleVO rule : rules) {
-            if (rule.getPurpose() != FirewallRule.Purpose.PortForwarding) {
-                continue;
-            }
-            PortForwardingRuleVO pfRule = portForwardingRulesDao.findById(rule.getId());
-            if (Objects.isNull(pfRule)) {
-                continue;
-            }
-            if (Objects.nonNull(kubernetesClusterVmMapDao.findByVmId(pfRule.getVirtualMachineId()))) {
-                clusterNodeRuleIds.add(pfRule.getId());
-            } else if (nodeIds.contains(pfRule.getVirtualMachineId()) && hasNodeSshPfShape(pfRule) && isOpenToAll(rule)) {
-                leftovers.add(pfRule);
-                leftoverPorts.add(pfRule.getSourcePortStart());
-            }
-        }
-        for (FirewallRuleVO rule : rules) {
-            if (rule.getPurpose() == FirewallRule.Purpose.Firewall && isSinglePort(rule) && leftoverPorts.contains(rule.getSourcePortStart())
-                    && List.of(NetUtils.ALL_IP4_CIDRS).equals(rule.getSourceCidrList())) {
-                leftoverFirewallRules.add(rule);
+        if (Objects.isNull(network.getVpcId())) {
+            Set<Long> leftoverPfIds = leftovers.stream().map(FirewallRuleVO::getId).collect(Collectors.toSet());
+            Set<Integer> ports = leftovers.stream().map(FirewallRuleVO::getSourcePortStart).collect(Collectors.toSet());
+            List<FirewallRuleVO> otherForwards = firewallRulesDao.listByIp(publicIp.getId()).stream()
+                    .filter(rule -> rule.getPurpose() != FirewallRule.Purpose.Firewall && !leftoverPfIds.contains(rule.getId())
+                            && Objects.nonNull(rule.getSourcePortStart()) && Objects.nonNull(rule.getSourcePortEnd()))
+                    .collect(Collectors.toList());
+            for (int port : ports) {
+                boolean portShared = otherForwards.stream().anyMatch(rule -> rule.getSourcePortStart() <= port && port <= rule.getSourcePortEnd());
+                if (portShared) {
+                    continue;
+                }
+                firewallRulesDao.listByIpPurposePortsProtocolAndNotRevoked(publicIp.getId(), port, port, NetUtils.TCP_PROTO, FirewallRule.Purpose.Firewall)
+                        .stream().filter(rule -> {
+                            firewallRulesDao.loadSourceCidrs(rule);
+                            firewallRulesDao.loadDestinationCidrs(rule);
+                            return List.of(NetUtils.ALL_IP4_CIDRS).equals(rule.getSourceCidrList())
+                                    && CollectionUtils.isEmpty(rule.getDestinationCidrList());
+                        }).forEach(leftoverFirewallRules::add);
             }
         }
-        Set<Long> leftoverIds = new HashSet<>();
-        leftovers.forEach(rule -> leftoverIds.add(rule.getId()));
-        leftoverFirewallRules.forEach(rule -> leftoverIds.add(rule.getId()));
         String ip = publicIp.getAddress().addr();
-        List<String> conflicts = rules.stream().filter(rule -> !leftoverIds.contains(rule.getId()))
-                .map(rule -> String.format("%s (%s, ports %s-%s%s)", rule.getUuid(), rule.getPurpose(), rule.getSourcePortStart(), rule.getSourcePortEnd(),
-                        clusterNodeRuleIds.contains(rule.getId()) ? ", forwards to a Kubernetes cluster node" : ""))
-                .collect(Collectors.toList());
-        if (!conflicts.isEmpty()) {
-            String advice = clusterNodeRuleIds.isEmpty() ? "They may be left over from a failed add-node; if so, remove them and retry"
-                    : "Rules that forward to a Kubernetes cluster node are in use and must not be removed; others may be left over from a failed add-node";
-            throw new CloudRuntimeException(String.format("Public IP %s ports %s-%s are needed for SSH to the new nodes of Kubernetes cluster %s, " +
-                    "but these network rules use them: %s. %s", ip, startPort, endPort, kubernetesCluster.getName(), conflicts, advice));
-        }
-        logger.info(String.format("Removing network rules %s on %s ports %s-%s left over from an earlier failed add-node to Kubernetes cluster %s",
-                leftoverIds, ip, startPort, endPort, kubernetesCluster.getName()));
+        List<Long> leftoverIds = Stream.concat(leftovers.stream(), leftoverFirewallRules.stream()).map(FirewallRuleVO::getId).collect(Collectors.toList());
+        logger.info(String.format("Removing network rules %s on %s left over from an earlier failed add-node to Kubernetes cluster %s",
+                leftoverIds, ip, kubernetesCluster.getName()));
         List<String> failed = revokeNodeSshRules(leftoverFirewallRules, leftovers);
         if (!failed.isEmpty()) {
             throw new CloudRuntimeException(String.format("Failed to remove network rules %s on %s left over from an earlier failed " +
@@ -423,16 +419,47 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
         }
     }
 
+    private boolean isInAnyCluster(long vmId) {
+        return kubernetesClusterVmMapDao.listByVmId(vmId).stream()
+                .anyMatch(map -> Objects.nonNull(kubernetesClusterDao.findById(map.getClusterId())));
+    }
+
     /**
-     * Port-forwarding and load balancing rules both claim the public port. A firewall rule only clashes with the
-     * node's rule when it lists 0.0.0.0/0 among its source CIDRs and has no destination CIDRs, matching the string
-     * comparison in FirewallManagerImpl#detectRulesConflict.
+     * Returns the lowest port after the positional ports of the control and default worker nodes (those stay
+     * reserved even without a rule, as other operations reach those nodes by position) that the node's SSH rules can
+     * take on the public IP, or null if there is none. A gap left by a removed node is reused.
      */
-    private boolean clashesWithNodeSshRules(Network network, FirewallRuleVO rule) {
-        if (rule.getPurpose() == FirewallRule.Purpose.PortForwarding || rule.getPurpose() == FirewallRule.Purpose.LoadBalancing) {
-            return true;
+    protected Integer getFreeNodeSshPort(Network network, IpAddress publicIp) {
+        boolean vpc = Objects.nonNull(network.getVpcId());
+        long positionalNodes = kubernetesClusterVmMapDao.listByClusterId(kubernetesCluster.getId()).stream()
+                .filter(map -> !map.isExternalNode() && !map.isEtcdNode()).count();
+        List<FirewallRuleVO> rules = firewallRulesDao.listByIp(publicIp.getId()).stream()
+                .filter(rule -> Objects.nonNull(rule.getSourcePortStart()) && Objects.nonNull(rule.getSourcePortEnd())
+                        && rule.getSourcePortEnd() >= CLUSTER_NODES_DEFAULT_START_SSH_PORT)
+                .sorted(Comparator.comparingInt(FirewallRuleVO::getSourcePortStart))
+                .collect(Collectors.toList());
+        int port = CLUSTER_NODES_DEFAULT_START_SSH_PORT + (int) positionalNodes;
+        for (FirewallRuleVO rule : rules) {
+            if (rule.getSourcePortStart() > port) {
+                break;
+            }
+            if (rule.getSourcePortEnd() < port) {
+                continue;
+            }
+            if (rule.getPurpose() == FirewallRule.Purpose.Firewall && (vpc || !isOpenTcpFirewallRule(rule))) {
+                continue;
+            }
+            port = Math.max(port, rule.getSourcePortEnd() + 1);
         }
-        if (rule.getPurpose() != FirewallRule.Purpose.Firewall || Objects.nonNull(network.getVpcId())) {
+        return port > NetUtils.PORT_RANGE_MAX ? null : port;
+    }
+
+    /**
+     * A firewall rule clashes with the node's tcp 0.0.0.0/0 firewall rule when it is tcp, lists 0.0.0.0/0 among its
+     * source CIDRs and has no destination CIDRs, matching FirewallManagerImpl#detectRulesConflict.
+     */
+    private boolean isOpenTcpFirewallRule(FirewallRuleVO rule) {
+        if (!NetUtils.TCP_PROTO.equalsIgnoreCase(rule.getProtocol())) {
             return false;
         }
         firewallRulesDao.loadSourceCidrs(rule);
