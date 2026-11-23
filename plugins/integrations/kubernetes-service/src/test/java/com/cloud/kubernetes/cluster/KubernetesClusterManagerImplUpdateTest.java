@@ -58,7 +58,9 @@ import com.cloud.kubernetes.cluster.actionworkers.KubernetesClusterRollingUpdate
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterAffinityGroupMapDao;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterDao;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterDetailsDao;
+import com.cloud.kubernetes.cluster.dao.KubernetesClusterMigrationDao;
 import com.cloud.kubernetes.cluster.dao.KubernetesClusterVmMapDao;
+import com.cloud.kubernetes.cluster.migrations.NodeTypeSettingsMigration;
 import com.cloud.kubernetes.version.KubernetesSupportedVersionVO;
 import com.cloud.kubernetes.version.dao.KubernetesSupportedVersionDao;
 import com.cloud.service.ServiceOfferingVO;
@@ -99,6 +101,8 @@ public class KubernetesClusterManagerImplUpdateTest {
     KubernetesClusterDetailsDao kubernetesClusterDetailsDao;
     @Mock
     KubernetesClusterAffinityGroupMapDao kubernetesClusterAffinityGroupMapDao;
+    @Mock
+    KubernetesClusterMigrationDao kubernetesClusterMigrationDao;
     @Mock
     KubernetesSupportedVersionDao kubernetesSupportedVersionDao;
     @Mock
@@ -260,9 +264,38 @@ public class KubernetesClusterManagerImplUpdateTest {
         Assert.assertNull(cluster.getEtcdNodeServiceOfferingId());
         Assert.assertEquals(Long.valueOf(40L), cluster.getControlNodeRootDiskSize());
         Assert.assertNull(cluster.getWorkerNodeRootDiskSize());
+        Mockito.verify(kubernetesClusterMigrationDao).persist(Mockito.argThat(m -> NodeTypeSettingsMigration.ID.equals(m.getMigrationId())));
         Mockito.verify(kubernetesClusterAffinityGroupMapDao).removeByClusterIdAndNodeType(CLUSTER_ID, WORKER.name());
         Mockito.verify(kubernetesClusterAffinityGroupMapDao, Mockito.times(2)).persist(Mockito.any());
         Mockito.verify(worker, Mockito.never()).rollout();
+    }
+
+    @Test
+    public void updateOfAConvertedClusterDoesNotConvertItAgain() {
+        cluster.setState(KubernetesCluster.State.Stopped);
+        cluster.setControlNodeServiceOfferingId(CLUSTER_OFFERING);
+        cluster.setWorkerNodeServiceOfferingId(CLUSTER_OFFERING);
+        Mockito.when(kubernetesClusterMigrationDao.findByClusterIdAndMigrationId(CLUSTER_ID, NodeTypeSettingsMigration.ID))
+                .thenReturn(new KubernetesClusterMigrationVO(CLUSTER_ID, NodeTypeSettingsMigration.ID));
+
+        Assert.assertTrue(manager.updateKubernetesCluster(cmd(false, null, null, Map.of(CONTROL.name(), 40L), null)));
+
+        Assert.assertEquals(Long.valueOf(40L), cluster.getControlNodeRootDiskSize());
+        Mockito.verify(manager, Mockito.never()).convertToNodeTypeSettings(Mockito.any());
+        Mockito.verify(kubernetesClusterMigrationDao, Mockito.never()).persist(Mockito.any());
+    }
+
+    @Test
+    public void updateGivingTheLastNodeTypeItsOfferingRecordsTheConversion() {
+        cluster.setState(KubernetesCluster.State.Stopped);
+        Mockito.doReturn(null).when(cluster).getServiceOfferingId();
+        cluster.setControlNodeServiceOfferingId(CLUSTER_OFFERING);
+        mockOffering(7L);
+
+        Assert.assertTrue(manager.updateKubernetesCluster(cmd(false, null, Map.of(WORKER.name(), 7L), null, null)));
+
+        Assert.assertEquals(Long.valueOf(7L), cluster.getWorkerNodeServiceOfferingId());
+        Mockito.verify(kubernetesClusterMigrationDao).persist(Mockito.argThat(m -> NodeTypeSettingsMigration.ID.equals(m.getMigrationId())));
     }
 
     @Test
