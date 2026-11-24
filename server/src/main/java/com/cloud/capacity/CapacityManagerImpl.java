@@ -751,16 +751,21 @@ public class CapacityManagerImpl extends ManagerBase implements CapacityManager,
                 clusterValuesCache.get(host.getClusterId());
         float clusterCpuOvercommitRatio = Float.parseFloat(clusterValues.first());
         float clusterRamOvercommitRatio = Float.parseFloat(clusterValues.second());
-        // offering ratios read once per offering for this host
+        // A VM whose offering sets a ratio is charged at it, as allocate and release do; one whose
+        // offering sets none keeps the ratio recorded when it started. Each offering is read once.
         Map<Long, Pair<Float, Float>> offeringRatiosById = new HashMap<>();
         for (VMInstanceVO vm : vms) {
             float cpuOvercommitRatio;
             float ramOvercommitRatio;
             Map<String, String> vmDetails = getVmDetailsForCapacityCalculation(vm.getId());
-            // as allocate and release charge it: the offering's own ratio, or else the cluster's
+            String vmDetailCpu = vmDetails.get(VmDetailConstants.CPU_OVER_COMMIT_RATIO);
+            String vmDetailRam = vmDetails.get(VmDetailConstants.MEMORY_OVER_COMMIT_RATIO);
+            // if vmDetailCpu or vmDetailRam is not null it means it is running in a overcommitted cluster.
+            cpuOvercommitRatio = (vmDetailCpu != null) ? Float.parseFloat(vmDetailCpu) : clusterCpuOvercommitRatio;
+            ramOvercommitRatio = (vmDetailRam != null) ? Float.parseFloat(vmDetailRam) : clusterRamOvercommitRatio;
             Pair<Float, Float> offeringRatios = offeringRatiosById.computeIfAbsent(vm.getServiceOfferingId(), this::getOfferingOvercommitRatios);
-            cpuOvercommitRatio = offeringRatios.first() != null ? offeringRatios.first() : clusterCpuOvercommitRatio;
-            ramOvercommitRatio = offeringRatios.second() != null ? offeringRatios.second() : clusterRamOvercommitRatio;
+            cpuOvercommitRatio = offeringRatios.first() != null ? offeringRatios.first() : cpuOvercommitRatio;
+            ramOvercommitRatio = offeringRatios.second() != null ? offeringRatios.second() : ramOvercommitRatio;
             ServiceOffering so = getServiceOffering(vm.getServiceOfferingId());
             if (so == null) {
                 so = _offeringsDao.findByIdIncludingRemoved(vm.getServiceOfferingId());
@@ -797,10 +802,18 @@ public class CapacityManagerImpl extends ManagerBase implements CapacityManager,
             long secondsSinceLastUpdate = (DateUtil.currentGMTTime().getTime() - lastModificationTime) / 1000;
             if (secondsSinceLastUpdate < _vmCapacityReleaseInterval) {
                 Map<String, String> vmDetails = getVmDetailsForCapacityCalculation(vm.getId());
-                // as release moves it to reserved: the offering's own ratio, or else the cluster's
+                String vmDetailCpu = vmDetails.get(VmDetailConstants.CPU_OVER_COMMIT_RATIO);
+                String vmDetailRam = vmDetails.get(VmDetailConstants.MEMORY_OVER_COMMIT_RATIO);
+                if (vmDetailCpu != null) {
+                    //if vmDetail_cpu is not null it means it is running in a overcommited cluster.
+                    cpuOvercommitRatio = Float.parseFloat(vmDetailCpu);
+                }
+                if (vmDetailRam != null) {
+                    ramOvercommitRatio = Float.parseFloat(vmDetailRam);
+                }
                 Pair<Float, Float> offeringRatios = offeringRatiosById.computeIfAbsent(vm.getServiceOfferingId(), this::getOfferingOvercommitRatios);
-                cpuOvercommitRatio = offeringRatios.first() != null ? offeringRatios.first() : clusterCpuOvercommitRatio;
-                ramOvercommitRatio = offeringRatios.second() != null ? offeringRatios.second() : clusterRamOvercommitRatio;
+                cpuOvercommitRatio = offeringRatios.first() != null ? offeringRatios.first() : cpuOvercommitRatio;
+                ramOvercommitRatio = offeringRatios.second() != null ? offeringRatios.second() : ramOvercommitRatio;
                 ServiceOffering so = getServiceOffering(vm.getServiceOfferingId());
                 if (so == null) {
                     so = _offeringsDao.findByIdIncludingRemoved(vm.getServiceOfferingId());
