@@ -100,7 +100,7 @@ public class VirtualMachineManagerOverCommitTest {
         Mockito.verify(profile).setMemoryOvercommitRatio(1.0f);
         Mockito.verify(vmInstanceDetailsDao).addDetail(VM_ID, CPU, "4.0", true);
         Mockito.verify(vmInstanceDetailsDao).addDetail(VM_ID, MEMORY, "1.0", true);
-        Mockito.verify(vmInstanceDetailsDao).addDetail(VM_ID, RECLAIM, "true", true);
+        Mockito.verify(vmInstanceDetailsDao).addDetail(VM_ID, RECLAIM, "true", false);
     }
 
     // --- what the offering asks for ---
@@ -135,6 +135,27 @@ public class VirtualMachineManagerOverCommitTest {
         // is how a mistyped "1" would otherwise land
         offeringSays(CPU, "0.1");
         assertNull(overCommit.offeringOverCommitRatio(profile(), CPU, 10.0f));
+    }
+
+    @Test
+    public void testNonFiniteOfferingRatioInheritsTheCluster() {
+        // Float.parseFloat accepts these, and either would make the VM's charge zero
+        offeringSays(CPU, "NaN");
+        assertNull(overCommit.offeringOverCommitRatio(profile(), CPU, 10.0f));
+        offeringSays(CPU, "Infinity");
+        assertNull(overCommit.offeringOverCommitRatio(profile(), CPU, 10.0f));
+    }
+
+    @Test
+    public void testResolveOverCommitRatioPrefersTheOffering() {
+        offeringSays(CPU, "1");
+        assertEquals(1.0f, overCommit.resolveOverCommitRatio(OFFERING_ID, CPU, 10.0f), 1e-6);
+    }
+
+    @Test
+    public void testResolveOverCommitRatioFallsBackToTheCluster() {
+        offeringSays(CPU, null);
+        assertEquals(10.0f, overCommit.resolveOverCommitRatio(OFFERING_ID, CPU, 10.0f), 1e-6);
     }
 
     @Test
@@ -203,7 +224,7 @@ public class VirtualMachineManagerOverCommitTest {
 
         overCommit.persistMemoryReclaimFlag(VM_ID, 1.0f);
 
-        Mockito.verify(vmInstanceDetailsDao).addDetail(VM_ID, RECLAIM, "true", true);
+        Mockito.verify(vmInstanceDetailsDao).addDetail(VM_ID, RECLAIM, "true", false);
     }
 
     @Test

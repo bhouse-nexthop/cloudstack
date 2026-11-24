@@ -5369,8 +5369,10 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         HostVO hostVo = _hostDao.findById(vm.getHostId());
 
         Long clusterId = hostVo.getClusterId();
-        Float memoryOvercommitRatio = CapacityManager.MemOverprovisioningFactor.valueIn(clusterId);
-        Float cpuOvercommitRatio = CapacityManager.CpuOverprovisioningFactor.valueIn(clusterId);
+        float memoryOvercommitRatio = vmOverCommit.resolveOverCommitRatio(newServiceOffering.getId(),
+                VmDetailConstants.MEMORY_OVER_COMMIT_RATIO, CapacityManager.MemOverprovisioningFactor.valueIn(clusterId));
+        float cpuOvercommitRatio = vmOverCommit.resolveOverCommitRatio(newServiceOffering.getId(),
+                VmDetailConstants.CPU_OVER_COMMIT_RATIO, CapacityManager.CpuOverprovisioningFactor.valueIn(clusterId));
         boolean divideMemoryByOverprovisioning = HypervisorGuruBase.VmMinMemoryEqualsMemoryDividedByMemOverprovisioningFactor.valueIn(clusterId);
         boolean divideCpuByOverprovisioning = HypervisorGuruBase.VmMinCpuSpeedEqualsCpuSpeedDividedByCpuOverprovisioningFactor.valueIn(clusterId);
 
@@ -5422,6 +5424,7 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
             boolean vmUpgraded = upgradeVmDb(vm.getId(), newServiceOffering, oldServiceOffering);
             if (vmUpgraded) {
                 vm = _vmDao.findById(vm.getId());
+                vmOverCommit.updateOverCommitRatioForVmProfile(new VirtualMachineProfileImpl(vm), clusterId);
             }
 
             if (vm.getType().equals(VirtualMachine.Type.User)) {

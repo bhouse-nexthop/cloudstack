@@ -1503,7 +1503,70 @@ public class ConfigurationManagerImplTest {
     }
 
     @Test(expected = InvalidParameterValueException.class)
+    public void validateOverCommitRatioInServiceOfferingDetailTestNaNIsRejected() {
+        validateOverCommitRatio("NaN");
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
+    public void validateOverCommitRatioInServiceOfferingDetailTestInfinityIsRejected() {
+        validateOverCommitRatio("Infinity");
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
     public void validateOverCommitRatioInServiceOfferingDetailTestNullIsRejected() {
         validateOverCommitRatio(null);
+    }
+
+    @Test
+    public void overCommitRatioDetailNameTestCanonicalisesAnyCase() {
+        Assert.assertEquals(VmDetailConstants.CPU_OVER_COMMIT_RATIO, ConfigurationManagerImpl.overCommitRatioDetailName("CPUOVERCOMMITRATIO"));
+        Assert.assertEquals(VmDetailConstants.MEMORY_OVER_COMMIT_RATIO, ConfigurationManagerImpl.overCommitRatioDetailName("MemoryOvercommitRatio"));
+        Assert.assertNull(ConfigurationManagerImpl.overCommitRatioDetailName("rootdisksize"));
+    }
+
+    private void checkOverCommitRatiosAs(Account.Type type, Map<String, String> requested, Map<String, String> source) {
+        Account caller = Mockito.mock(Account.class);
+        Mockito.when(caller.getId()).thenReturn(42L);
+        AccountManager accountManager = Mockito.mock(AccountManager.class);
+        Mockito.when(accountManager.isRootAdmin(42L)).thenReturn(type == Account.Type.ADMIN);
+        ReflectionTestUtils.setField(configurationManagerImplSpy, "_accountMgr", accountManager);
+        CallContext callContext = Mockito.mock(CallContext.class);
+        Mockito.when(callContext.getCallingAccount()).thenReturn(caller);
+        try (MockedStatic<CallContext> callContextMock = Mockito.mockStatic(CallContext.class)) {
+            callContextMock.when(CallContext::current).thenReturn(callContext);
+            configurationManagerImplSpy.checkCallerMaySetOverCommitRatios(requested, source);
+        }
+    }
+
+    @Test
+    public void checkCallerMaySetOverCommitRatiosTestRootAdminMaySetThem() {
+        checkOverCommitRatiosAs(Account.Type.ADMIN, Map.of("cpuOvercommitRatio", "1"), Collections.emptyMap());
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
+    public void checkCallerMaySetOverCommitRatiosTestDomainAdminMayNotSetThem() {
+        checkOverCommitRatiosAs(Account.Type.DOMAIN_ADMIN, Map.of("MemoryOvercommitRatio", "1"), Collections.emptyMap());
+    }
+
+    @Test
+    public void checkCallerMaySetOverCommitRatiosTestDomainAdminMayCloneThemUnchanged() {
+        checkOverCommitRatiosAs(Account.Type.DOMAIN_ADMIN, Map.of("cpuOvercommitRatio", "1", "other", "x"),
+                Map.of("cpuOvercommitRatio", "1"));
+    }
+
+    @Test
+    public void checkCallerMaySetOverCommitRatiosTestDomainAdminMayCloneThemUnchangedFromAnotherCase() {
+        // a source offering created before the keys were stored under their canonical name
+        checkOverCommitRatiosAs(Account.Type.DOMAIN_ADMIN, Map.of("cpuOvercommitRatio", "1"), Map.of("CPUOVERCOMMITRATIO", "1"));
+    }
+
+    @Test
+    public void checkCallerMaySetOverCommitRatiosTestNullSource() {
+        checkOverCommitRatiosAs(Account.Type.ADMIN, Map.of("cpuOvercommitRatio", "1"), null);
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
+    public void checkCallerMaySetOverCommitRatiosTestDomainAdminMayNotChangeThemOnClone() {
+        checkOverCommitRatiosAs(Account.Type.DOMAIN_ADMIN, Map.of("cpuOvercommitRatio", "4"), Map.of("cpuOvercommitRatio", "1"));
     }
 }

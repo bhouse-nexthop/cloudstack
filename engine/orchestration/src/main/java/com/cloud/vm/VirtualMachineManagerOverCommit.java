@@ -21,6 +21,7 @@ import javax.inject.Inject;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import com.cloud.capacity.CapacityManager;
 import com.cloud.dc.ClusterDetailsDao;
 import com.cloud.dc.ClusterDetailsVO;
 import com.cloud.service.dao.ServiceOfferingDetailsDao;
@@ -68,30 +69,36 @@ public class VirtualMachineManagerOverCommit {
      * kept off the overcommit: they are charged their full request and hold all of it.
      */
     protected Float offeringOverCommitRatio(VirtualMachineProfile vmProfile, String key, float clusterRatio) {
-        String offeringRatio = serviceOfferingDetailsDao.getDetail(vmProfile.getServiceOfferingId(), key);
+        return offeringOverCommitRatio(vmProfile.getServiceOfferingId(), key, clusterRatio);
+    }
+
+    protected Float offeringOverCommitRatio(long serviceOfferingId, String key, float clusterRatio) {
+        String offeringRatio = serviceOfferingDetailsDao.getDetail(serviceOfferingId, key);
         if (offeringRatio == null) {
             return null;
         }
-        float ratio;
-        try {
-            ratio = Float.parseFloat(offeringRatio);
-        } catch (NumberFormatException e) {
-            logger.warn("Ignoring {} of [{}] on service offering {}: it is not a number.",
-                    key, offeringRatio, vmProfile.getServiceOfferingId());
-            return null;
-        }
-        if (ratio < 1) {
+        Float ratio = CapacityManager.parseOfferingOverCommitRatio(offeringRatio);
+        if (ratio == null) {
             // rejected when the offering is created; only reachable by writing the detail directly
-            logger.warn("Ignoring {} of {} on service offering {}: it must be at least 1.",
-                    key, offeringRatio, vmProfile.getServiceOfferingId());
+            logger.warn("Ignoring {} of [{}] on service offering {}: it must be a finite number of at least 1.",
+                    key, offeringRatio, serviceOfferingId);
             return null;
         }
         if (ratio > clusterRatio) {
-            logger.info("Service offering {} declares {} of {}, more than its cluster's {}, so its VMs are "
+            logger.debug("Service offering {} declares {} of {}, more than its cluster's {}, so its VMs are "
                             + "oversubscribed further than the cluster default.",
-                    vmProfile.getServiceOfferingId(), key, ratio, clusterRatio);
+                    serviceOfferingId, key, ratio, clusterRatio);
         }
         return ratio;
+    }
+
+    /**
+     * The ratio a VM of this offering would run at in a cluster with the given ratio, without
+     * recording anything on the VM.
+     */
+    public float resolveOverCommitRatio(long serviceOfferingId, String key, float clusterRatio) {
+        Float offeringRatio = offeringOverCommitRatio(serviceOfferingId, key, clusterRatio);
+        return offeringRatio != null ? offeringRatio : clusterRatio;
     }
 
     /**
@@ -109,7 +116,7 @@ public class VirtualMachineManagerOverCommit {
         boolean disable = offeringRatio != null && offeringRatio <= 1f;
         VMInstanceDetailVO existing = vmInstanceDetailsDao.findDetail(vmId, VmDetailConstants.MEMORY_RECLAIM_DISABLED);
         if (disable && existing == null) {
-            vmInstanceDetailsDao.addDetail(vmId, VmDetailConstants.MEMORY_RECLAIM_DISABLED, "true", true);
+            vmInstanceDetailsDao.addDetail(vmId, VmDetailConstants.MEMORY_RECLAIM_DISABLED, "true", false);
         } else if (!disable && existing != null) {
             vmInstanceDetailsDao.removeDetail(vmId, VmDetailConstants.MEMORY_RECLAIM_DISABLED);
         }
