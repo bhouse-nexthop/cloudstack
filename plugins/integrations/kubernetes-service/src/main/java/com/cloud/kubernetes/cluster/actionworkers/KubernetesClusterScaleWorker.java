@@ -21,7 +21,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -858,46 +857,72 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
                     kubernetesCluster.getName(), clusterSize, externalNodes));
         }
         if (nodeTypesKnown) {
-            syncNodeCounts(controlNodes, etcdNodes, workerNodes);
+            syncNodeCounts(clusterVMs, controlNodes, etcdNodes, workerNodes);
         }
     }
 
-    private void syncNodeCounts(long controlNodes, long etcdNodes, long workerNodes) {
-        Map<KubernetesClusterNodeType, Long> missingNodes = new EnumMap<>(KubernetesClusterNodeType.class);
-        missingNodes.put(CONTROL, controlNodes - kubernetesCluster.getControlNodeCount());
-        missingNodes.put(ETCD, etcdNodes - kubernetesCluster.getEtcdNodeCount());
-        missingNodes.put(WORKER, workerNodes - kubernetesCluster.getNodeCount());
-        missingNodes.values().removeIf(count -> count == 0);
-        if (missingNodes.isEmpty()) {
+    private void syncNodeCounts(List<KubernetesClusterVmMapVO> clusterVMs, long controlNodes, long etcdNodes, long workerNodes) {
+        if (controlNodes == kubernetesCluster.getControlNodeCount() && etcdNodes == kubernetesCluster.getEtcdNodeCount()
+                && workerNodes == kubernetesCluster.getNodeCount()) {
             return;
         }
         logger.warn("Kubernetes cluster {} records {} control, {} etcd and {} worker nodes but has {}, {} and {}, correcting it", kubernetesCluster,
                 kubernetesCluster.getControlNodeCount(), kubernetesCluster.getEtcdNodeCount(), kubernetesCluster.getNodeCount(), controlNodes, etcdNodes, workerNodes);
         KubernetesClusterVO kubernetesClusterVO = kubernetesClusterDao.findById(kubernetesCluster.getId());
-        for (Map.Entry<KubernetesClusterNodeType, Long> missing : missingNodes.entrySet()) {
-            ServiceOffering offering = null;
-            try {
-                offering = getServiceOfferingForNodeTypeOnCluster(missing.getKey(), kubernetesCluster);
-            } catch (CloudRuntimeException e) {
-                logger.debug("No service offering found for {} nodes of Kubernetes cluster {}", missing.getKey(), kubernetesCluster, e);
-            }
-            if (offering == null) {
-                logger.warn("Unable to find the {} service offering of Kubernetes cluster {}, its cores and memory are not corrected", missing.getKey(), kubernetesCluster);
-                continue;
-            }
-            Pair<Long, Long> missingCapacity = calculateNodesCapacity(offering, missing.getValue());
-            kubernetesClusterVO.setCores(kubernetesClusterVO.getCores() + missingCapacity.first());
-            kubernetesClusterVO.setMemory(kubernetesClusterVO.getMemory() + missingCapacity.second());
+        Pair<Long, Long> capacity = getClusterVMsCapacity(clusterVMs);
+        if (capacity != null) {
+            kubernetesClusterVO.setCores(capacity.first());
+            kubernetesClusterVO.setMemory(capacity.second());
         }
-        if (missingNodes.containsKey(CONTROL)) {
-            kubernetesClusterVO.setControlNodeCount(controlNodes);
-        }
-        if (missingNodes.containsKey(ETCD)) {
-            kubernetesClusterVO.setEtcdNodeCount(etcdNodes);
-        }
+        kubernetesClusterVO.setControlNodeCount(controlNodes);
+        kubernetesClusterVO.setEtcdNodeCount(etcdNodes);
         kubernetesClusterVO.setNodeCount(workerNodes);
         kubernetesClusterDao.update(kubernetesClusterVO.getId(), kubernetesClusterVO);
         kubernetesCluster = kubernetesClusterVO;
+    }
+
+    /**
+     * The cores and memory of the cluster's VMs, each by its own offering, or null if that can not be read for any of them
+     */
+    private Pair<Long, Long> getClusterVMsCapacity(List<KubernetesClusterVmMapVO> clusterVMs) {
+        long cores = 0;
+        long memory = 0;
+        for (KubernetesClusterVmMapVO vmMapVO : clusterVMs) {
+            ServiceOffering offering = getVmServiceOffering(vmMapVO.getVmId());
+            if (offering == null) {
+                logger.warn("Kubernetes cluster {} cores and memory are left unchanged", kubernetesCluster);
+                return null;
+            }
+            cores += offering.getCpu();
+            memory += offering.getRamSize();
+        }
+        return new Pair<>(cores, memory);
+    }
+
+    private ServiceOffering getVmServiceOffering(long vmId) {
+        UserVmVO userVm = userVmDao.findById(vmId);
+        if (userVm == null) {
+            logger.warn("Unable to find VM {} of Kubernetes cluster {}", vmId, kubernetesCluster);
+            return null;
+        }
+        ServiceOfferingVO offering = serviceOfferingDao.findByIdIncludingRemoved(userVm.getServiceOfferingId());
+        if (offering == null) {
+            logger.warn("Unable to find the service offering of VM {} of Kubernetes cluster {}", userVm, kubernetesCluster);
+            return null;
+        }
+        if (offering.isDynamic()) {
+            try {
+                offering = serviceOfferingDao.findByIdIncludingRemoved(userVm.getId(), userVm.getServiceOfferingId());
+            } catch (NumberFormatException e) {
+                logger.warn("Unable to read the CPU and memory details of VM {} of Kubernetes cluster {}", userVm, kubernetesCluster, e);
+                return null;
+            }
+        }
+        if (offering.getCpu() == null || offering.getRamSize() == null) {
+            logger.warn("The service offering of VM {} of Kubernetes cluster {} has no CPU and memory set", userVm, kubernetesCluster);
+            return null;
+        }
+        return offering;
     }
 
     /**
