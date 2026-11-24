@@ -1570,6 +1570,14 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             throw new InvalidParameterValueException(
                     String.format("Maximum cluster size can not exceed %d. Please contact your administrator", maxClusterSize));
         }
+        if (clusterSize < kubernetesCluster.getNodeCount()) { // Downscale
+            long externalNodeCount = kubernetesClusterVmMapDao.listByClusterId(kubernetesCluster.getId()).stream()
+                    .filter(KubernetesClusterVmMapVO::isExternalNode).count();
+            if (clusterSize < externalNodeCount) {
+                throw new InvalidParameterValueException(String.format("Kubernetes cluster : %s cannot be scaled to size %d, it has %d nodes added with addNodesToKubernetesCluster which scaling does not remove. Use removeNodesFromKubernetesCluster to remove them",
+                        kubernetesCluster.getName(), clusterSize, externalNodeCount));
+            }
+        }
         if (clusterSize > kubernetesCluster.getNodeCount()) { // Upscale
             VMTemplateVO template = templateDao.findById(kubernetesCluster.getTemplateId());
             if (template == null) {
@@ -1578,6 +1586,27 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             if (CollectionUtils.isEmpty(templateJoinDao.newTemplateView(template, zone.getId(), true))) {
                 throw new InvalidParameterValueException(String.format("Template : %s associated with Kubernetes cluster : %s is not in Ready state for datacenter : %s", template.getName(), kubernetesCluster.getName(), zone.getName()));
             }
+        }
+    }
+
+    protected void validateKubernetesClusterScaleNodeIds(final KubernetesClusterVO kubernetesCluster, final List<Long> nodeIds) {
+        List<KubernetesClusterVmMapVO> nodes = kubernetesClusterVmMapDao.listByClusterIdAndVmIdsIn(kubernetesCluster.getId(), nodeIds);
+        // Do all the nodes exist ?
+        if (nodes == null || nodes.size() != nodeIds.size()) {
+            throw new InvalidParameterValueException("Invalid node ids");
+        }
+        if (nodes.stream().anyMatch(KubernetesClusterVmMapVO::isExternalNode)) {
+            throw new InvalidParameterValueException("nodeids can not include nodes added with addNodesToKubernetesCluster, use removeNodesFromKubernetesCluster to remove them");
+        }
+        // Ensure there's always a control node
+        long controleNodesToRemove = nodes.stream().filter(x -> x.isControlNode()).count();
+        if (controleNodesToRemove >= kubernetesCluster.getControlNodeCount()) {
+            throw new InvalidParameterValueException("Can not remove all control nodes from a cluster");
+        }
+        // Ensure there's always a node
+        long nodesToRemove = nodes.stream().filter(x -> !x.isControlNode()).count();
+        if (nodesToRemove >= kubernetesCluster.getNodeCount()) {
+            throw new InvalidParameterValueException("Can not remove all nodes from a cluster");
         }
     }
 
@@ -1747,21 +1776,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             if (clusterSize != null || defaultServiceOfferingId != null || workerOfferingId != null) {
                 throw new InvalidParameterValueException("nodeids can not be passed along with clustersize or service offering");
             }
-            List<KubernetesClusterVmMapVO> nodes = kubernetesClusterVmMapDao.listByClusterIdAndVmIdsIn(kubernetesCluster.getId(), nodeIds);
-            // Do all the nodes exist ?
-            if (nodes == null || nodes.size() != nodeIds.size()) {
-                throw new InvalidParameterValueException("Invalid node ids");
-            }
-            // Ensure there's always a control node
-            long controleNodesToRemove = nodes.stream().filter(x -> x.isControlNode()).count();
-            if (controleNodesToRemove >= kubernetesCluster.getControlNodeCount()) {
-                throw new InvalidParameterValueException("Can not remove all control nodes from a cluster");
-            }
-            // Ensure there's always a node
-            long nodesToRemove = nodes.stream().filter(x -> !x.isControlNode()).count();
-            if (nodesToRemove >= kubernetesCluster.getNodeCount()) {
-                throw new InvalidParameterValueException("Can not remove all nodes from a cluster");
-            }
+            validateKubernetesClusterScaleNodeIds(kubernetesCluster, nodeIds);
         }
 
         validateServiceOfferingsForNodeTypesScale(serviceOfferingNodeTypeMap, defaultServiceOfferingId, kubernetesCluster, clusterVersion);
