@@ -193,7 +193,93 @@ public class KubernetesClusterScaleWorkerTest {
 
         Assert.assertEquals(otherNodesCores + workerNodes * 4, newClusterCapacity.first().longValue());
         Assert.assertEquals(otherNodesMemory + workerNodes * 8192, newClusterCapacity.second().longValue());
-        Mockito.verifyNoInteractions(kubernetesClusterVmMapDao, userVmDao);
+        Mockito.verifyNoInteractions(userVmDao);
+    }
+
+    private KubernetesClusterVmMapVO mockVmMap(long vmId, boolean externalNode) {
+        KubernetesClusterVmMapVO vmMap = Mockito.mock(KubernetesClusterVmMapVO.class);
+        Mockito.lenient().when(vmMap.getVmId()).thenReturn(vmId);
+        Mockito.when(vmMap.isExternalNode()).thenReturn(externalNode);
+        return vmMap;
+    }
+
+    @Test
+    public void testCalculateNewClusterCountAndCapacityWorkerOfferingScaleKeepsAddedNodes() {
+        long kubernetesClusterId = 10L;
+        long cksWorkers = 3L;
+        long addedNodeCores = 8L;
+        long addedNodeMemory = 16384L;
+        long otherNodesCores = 4L;
+        long otherNodesMemory = 4096L;
+        Mockito.when(kubernetesCluster.getId()).thenReturn(kubernetesClusterId);
+        Mockito.when(kubernetesCluster.getNodeCount()).thenReturn(cksWorkers + 1);
+        Mockito.when(kubernetesCluster.getServiceOfferingId()).thenReturn(defaultOfferingId);
+        Mockito.when(kubernetesCluster.getWorkerNodeServiceOfferingId()).thenReturn(workerOfferingId);
+        mockOffering(workerOfferingId, 2, 2048);
+        Mockito.when(kubernetesCluster.getCores()).thenReturn(otherNodesCores + addedNodeCores + cksWorkers * 2);
+        Mockito.when(kubernetesCluster.getMemory()).thenReturn(otherNodesMemory + addedNodeMemory + cksWorkers * 2048);
+        List<KubernetesClusterVmMapVO> workerVmMaps = List.of(mockVmMap(11L, false), mockVmMap(12L, false), mockVmMap(13L, false), mockVmMap(14L, true));
+        Mockito.when(kubernetesClusterVmMapDao.listByClusterIdAndVmType(kubernetesClusterId, WORKER)).thenReturn(workerVmMaps);
+        ServiceOfferingVO newOffering = Mockito.mock(ServiceOfferingVO.class);
+        Mockito.when(newOffering.getCpu()).thenReturn(4);
+        Mockito.when(newOffering.getRamSize()).thenReturn(8192);
+
+        Pair<Long, Long> newClusterCapacity = worker.calculateNewClusterCountAndCapacity(null, WORKER, newOffering);
+
+        Assert.assertEquals(otherNodesCores + addedNodeCores + cksWorkers * 4, newClusterCapacity.first().longValue());
+        Assert.assertEquals(otherNodesMemory + addedNodeMemory + cksWorkers * 8192, newClusterCapacity.second().longValue());
+    }
+
+    @Test
+    public void testCalculateNewClusterCountAndCapacityWorkerSizeAndOfferingKeepsAddedNodes() {
+        long kubernetesClusterId = 10L;
+        long cksWorkers = 2L;
+        long newWorkerSize = 5L;
+        long addedNodeCores = 8L;
+        long addedNodeMemory = 16384L;
+        Mockito.when(kubernetesCluster.getId()).thenReturn(kubernetesClusterId);
+        Mockito.when(kubernetesCluster.getNodeCount()).thenReturn(cksWorkers + 1);
+        Mockito.when(kubernetesCluster.getServiceOfferingId()).thenReturn(defaultOfferingId);
+        Mockito.when(kubernetesCluster.getWorkerNodeServiceOfferingId()).thenReturn(workerOfferingId);
+        mockOffering(workerOfferingId, 2, 2048);
+        Mockito.when(kubernetesCluster.getCores()).thenReturn(addedNodeCores + cksWorkers * 2);
+        Mockito.when(kubernetesCluster.getMemory()).thenReturn(addedNodeMemory + cksWorkers * 2048);
+        List<KubernetesClusterVmMapVO> workerVmMaps = List.of(mockVmMap(11L, false), mockVmMap(12L, false), mockVmMap(14L, true));
+        Mockito.when(kubernetesClusterVmMapDao.listByClusterIdAndVmType(kubernetesClusterId, WORKER)).thenReturn(workerVmMaps);
+        ServiceOfferingVO newOffering = Mockito.mock(ServiceOfferingVO.class);
+        Mockito.when(newOffering.getCpu()).thenReturn(4);
+        Mockito.when(newOffering.getRamSize()).thenReturn(8192);
+
+        Pair<Long, Long> newClusterCapacity = worker.calculateNewClusterCountAndCapacity(newWorkerSize, WORKER, newOffering);
+
+        Assert.assertEquals(addedNodeCores + (newWorkerSize - 1) * 4, newClusterCapacity.first().longValue());
+        Assert.assertEquals(addedNodeMemory + (newWorkerSize - 1) * 8192, newClusterCapacity.second().longValue());
+    }
+
+    @Test
+    public void testGetExistingOfferingIdForWorkerSkipsAddedNodes() {
+        long kubernetesClusterId = 10L;
+        Mockito.when(kubernetesCluster.getId()).thenReturn(kubernetesClusterId);
+        List<KubernetesClusterVmMapVO> workerVmMaps = List.of(mockVmMap(14L, true), mockVmMap(11L, false));
+        Mockito.when(kubernetesClusterVmMapDao.listByClusterIdAndVmType(kubernetesClusterId, WORKER)).thenReturn(workerVmMaps);
+        UserVmVO cksWorker = Mockito.mock(UserVmVO.class);
+        Mockito.when(cksWorker.getServiceOfferingId()).thenReturn(workerOfferingId);
+        Mockito.when(userVmDao.findById(11L)).thenReturn(cksWorker);
+
+        Assert.assertEquals(workerOfferingId, worker.getExistingOfferingIdForNodeType(WORKER, kubernetesCluster));
+        Mockito.verify(userVmDao, Mockito.never()).findById(14L);
+    }
+
+    @Test
+    public void testGetExistingOfferingIdForWorkerWithOnlyAddedNodesUsesWorkerOffering() {
+        long kubernetesClusterId = 10L;
+        Mockito.when(kubernetesCluster.getId()).thenReturn(kubernetesClusterId);
+        Mockito.when(kubernetesCluster.getWorkerNodeServiceOfferingId()).thenReturn(workerOfferingId);
+        List<KubernetesClusterVmMapVO> workerVmMaps = List.of(mockVmMap(14L, true));
+        Mockito.when(kubernetesClusterVmMapDao.listByClusterIdAndVmType(kubernetesClusterId, WORKER)).thenReturn(workerVmMaps);
+
+        Assert.assertEquals(workerOfferingId, worker.getExistingOfferingIdForNodeType(WORKER, kubernetesCluster));
+        Mockito.verifyNoInteractions(userVmDao);
     }
 
     @Test

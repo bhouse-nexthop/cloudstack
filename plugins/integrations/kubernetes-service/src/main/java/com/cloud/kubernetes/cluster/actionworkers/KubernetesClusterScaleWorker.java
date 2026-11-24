@@ -269,13 +269,16 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
             cores = serviceOffering.getCpu() * totalClusterSize;
             memory = serviceOffering.getRamSize() * totalClusterSize;
         } else {
-            long nodeCount = getNodeCountForType(nodeType, kubernetesCluster);
+            // Nodes added with addNodesToKubernetesCluster keep their own offering and are never scaled,
+            // so their share of the totals stays as it was counted when they were added
+            long addedNodeCount = WORKER == nodeType ? getAddedNodeCount() : 0;
+            long nodeCount = Math.max(0, getNodeCountForType(nodeType, kubernetesCluster) - addedNodeCount);
             // Read from the cluster, not its VMs: an offering scale has already upgraded the VMs at this point
             ServiceOffering previousOffering = nodeCount > 0 ?
                     getServiceOfferingForNodeTypeOnCluster(nodeType, kubernetesCluster) : serviceOffering;
             Pair<Long, Long> previousNodesCapacity = calculateNodesCapacity(previousOffering, nodeCount);
             if (WORKER == nodeType) {
-                nodeCount = newWorkerSize == null ? kubernetesCluster.getNodeCount() : newWorkerSize;
+                nodeCount = Math.max(0, (newWorkerSize == null ? kubernetesCluster.getNodeCount() : newWorkerSize) - addedNodeCount);
             }
             Pair<Long, Long> newNodesCapacity = calculateNodesCapacity(serviceOffering, nodeCount);
             Pair<Long, Long> newClusterCapacity = calculateClusterNewCapacity(kubernetesCluster, previousNodesCapacity, newNodesCapacity);
@@ -283,6 +286,16 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
             memory = newClusterCapacity.second();
         }
         return new Pair<>(cores, memory);
+    }
+
+    private long getAddedNodeCount() {
+        return kubernetesClusterVmMapDao.listByClusterIdAndVmType(kubernetesCluster.getId(), WORKER).stream()
+                .filter(KubernetesClusterVmMapVO::isExternalNode).count();
+    }
+
+    private List<KubernetesClusterVmMapVO> listCksNodesOfType(KubernetesClusterNodeType nodeType, KubernetesCluster cluster) {
+        return kubernetesClusterVmMapDao.listByClusterIdAndVmType(cluster.getId(), nodeType).stream()
+                .filter(vm -> !vm.isExternalNode()).collect(Collectors.toList());
     }
 
     private long getNodeCountForType(KubernetesClusterNodeType nodeType, KubernetesCluster kubernetesCluster) {
@@ -451,7 +464,7 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
             return;
         }
         final long size = getNodeCountForType(nodeType, kubernetesCluster);
-        List<KubernetesClusterVmMapVO> vmList = kubernetesClusterVmMapDao.listByClusterIdAndVmType(kubernetesCluster.getId(), nodeType);
+        List<KubernetesClusterVmMapVO> vmList = listCksNodesOfType(nodeType, kubernetesCluster);
         final long tobeScaledVMCount =  Math.min(vmList.size(), size);
         for (long i = 0; i < tobeScaledVMCount; i++) {
             KubernetesClusterVmMapVO vmMapVO = vmList.get((int) i);
@@ -1034,8 +1047,11 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
     }
 
     protected Long getExistingOfferingIdForNodeType(KubernetesClusterNodeType nodeType, KubernetesCluster kubernetesCluster) {
-        List<KubernetesClusterVmMapVO> clusterVms = kubernetesClusterVmMapDao.listByClusterIdAndVmType(kubernetesCluster.getId(), nodeType);
+        List<KubernetesClusterVmMapVO> clusterVms = listCksNodesOfType(nodeType, kubernetesCluster);
         if (CollectionUtils.isEmpty(clusterVms)) {
+            if (WORKER == nodeType && kubernetesCluster.getWorkerNodeServiceOfferingId() != null) {
+                return kubernetesCluster.getWorkerNodeServiceOfferingId();
+            }
             return kubernetesCluster.getServiceOfferingId();
         }
         KubernetesClusterVmMapVO clusterVm = clusterVms.get(0);
