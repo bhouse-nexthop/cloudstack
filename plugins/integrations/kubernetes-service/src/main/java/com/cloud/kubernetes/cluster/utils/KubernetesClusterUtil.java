@@ -50,6 +50,7 @@ import com.cloud.kubernetes.cluster.KubernetesCluster;
 import com.cloud.kubernetes.cluster.KubernetesServiceHelper.KubernetesClusterNodeType;
 import com.cloud.uservm.UserVm;
 import com.cloud.utils.Pair;
+import com.cloud.utils.net.NetUtils;
 import com.cloud.utils.nio.TrustAllManager;
 import com.cloud.utils.ssh.SshHelper;
 
@@ -95,6 +96,7 @@ public class KubernetesClusterUtil {
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final char[] BOOTSTRAP_TOKEN_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789".toCharArray();
     private static final Pattern JOIN_TOKEN = Pattern.compile("--token\\s+([a-z0-9]{6}\\.[a-z0-9]{16})(?!\\S)");
+    private static final Pattern JOIN_ENDPOINT = Pattern.compile("kubeadm join ([0-9.]+):[0-9]+(?!\\S)");
     private static final Pattern JOIN_CA_CERT_HASH = Pattern.compile("--discovery-token-ca-cert-hash\\s+(sha256:[0-9a-f]{64})(?!\\S)");
 
     public static boolean isKubernetesClusterNodeReady(final KubernetesCluster kubernetesCluster, String ipAddress, int port,
@@ -412,6 +414,23 @@ public class KubernetesClusterUtil {
 
     public static String getCaCertHash(final PublicKey caPublicKey) {
         return "sha256:" + DigestUtils.sha256Hex(caPublicKey.getEncoded());
+    }
+
+    /**
+     * Parses the API server address from the output of kubeadm token create --print-join-command.
+     * kubeadm prints the controlPlaneEndpoint if the cluster has one, else the advertise address,
+     * so the API server certificate is valid for it.
+     * @return the IPv4 address, or null if there is none
+     */
+    public static String parseJoinEndpointIp(final String joinCommand) {
+        if (StringUtils.isBlank(joinCommand)) {
+            return null;
+        }
+        Matcher endpoint = JOIN_ENDPOINT.matcher(joinCommand);
+        if (!endpoint.find() || !NetUtils.isValidIp4(endpoint.group(1))) {
+            return null;
+        }
+        return endpoint.group(1);
     }
 
     /**

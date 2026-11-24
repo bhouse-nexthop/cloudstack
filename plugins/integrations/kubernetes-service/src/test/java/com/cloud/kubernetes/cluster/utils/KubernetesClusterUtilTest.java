@@ -173,6 +173,16 @@ public class KubernetesClusterUtilTest {
     }
 
     @Test
+    public void testParseJoinEndpointIp() {
+        String joinArgs = " --token abcdef.0123456789abcdef --discovery-token-ca-cert-hash sha256:9826a516d7c2f8974dd0a09a64048c5cba6ff67780b01568b13cd3acf92a409f \n";
+        Assert.assertEquals("203.0.113.5", KubernetesClusterUtil.parseJoinEndpointIp("kubeadm join 203.0.113.5:6443" + joinArgs));
+        Assert.assertNull(KubernetesClusterUtil.parseJoinEndpointIp(null));
+        Assert.assertNull(KubernetesClusterUtil.parseJoinEndpointIp("kubeadm join api.example.com:6443" + joinArgs));
+        Assert.assertNull(KubernetesClusterUtil.parseJoinEndpointIp("kubeadm join 999.1.1.1:6443" + joinArgs));
+        Assert.assertNull(KubernetesClusterUtil.parseJoinEndpointIp("kubeadm join 10.1.1.10:6443;id" + joinArgs));
+    }
+
+    @Test
     public void testParseJoinCommandInvalid() {
         Assert.assertNull(KubernetesClusterUtil.parseJoinCommand(null));
         Assert.assertNull(KubernetesClusterUtil.parseJoinCommand("failed to load admin kubeconfig"));
