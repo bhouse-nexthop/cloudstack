@@ -23,6 +23,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentMatchers;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -35,6 +36,7 @@ import com.cloud.kubernetes.cluster.KubernetesClusterEventTypes;
 import com.cloud.kubernetes.cluster.KubernetesClusterManagerImpl;
 import com.cloud.user.Account;
 import com.cloud.user.User;
+import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.vm.UserVmVO;
 import com.cloud.vm.dao.UserVmDao;
 import org.apache.cloudstack.api.ApiCommandResourceType;
@@ -100,11 +102,88 @@ public class KubernetesClusterAddWorkerResultTest {
         CallContext.register(user, account);
         try (MockedStatic<ActionEventUtils> events = Mockito.mockStatic(ActionEventUtils.class)) {
             addWorker.recordNodesAdditionFailure("boom");
+            addWorker.recordNodesAdditionFailure("x".repeat(2000));
             events.verify(() -> ActionEventUtils.onCompletedActionEvent(ArgumentMatchers.eq(5L), ArgumentMatchers.eq(6L),
                     ArgumentMatchers.eq(EventVO.LEVEL_ERROR), ArgumentMatchers.eq(KubernetesClusterEventTypes.EVENT_KUBERNETES_CLUSTER_NODES_ADD),
                     ArgumentMatchers.eq("boom"), ArgumentMatchers.eq(10L), ArgumentMatchers.eq(ApiCommandResourceType.KubernetesCluster.toString()), ArgumentMatchers.eq(0L)));
+            events.verify(() -> ActionEventUtils.onCompletedActionEvent(ArgumentMatchers.eq(5L), ArgumentMatchers.eq(6L),
+                    ArgumentMatchers.eq(EventVO.LEVEL_ERROR), ArgumentMatchers.eq(KubernetesClusterEventTypes.EVENT_KUBERNETES_CLUSTER_NODES_ADD),
+                    ArgumentMatchers.argThat((String d) -> d.length() == 1024 && d.endsWith("...")), ArgumentMatchers.eq(10L),
+                    ArgumentMatchers.eq(ApiCommandResourceType.KubernetesCluster.toString()), ArgumentMatchers.eq(0L)));
         } finally {
             CallContext.unregister();
         }
+    }
+
+    private KubernetesClusterAddWorker spyForFailure() {
+        KubernetesClusterAddWorker worker = Mockito.spy(addWorker);
+        Mockito.doNothing().when(worker).recordNodesAdditionFailure(Mockito.anyString());
+        Mockito.doNothing().when(worker).detachCksIsoFromNodesAddedToCluster(Mockito.anyList(), Mockito.anyLong(), Mockito.anyBoolean());
+        return worker;
+    }
+
+    @Test
+    public void testFailNodesAdditionWaitsForReadyNodesBeforeDetachOnPartialAdd() {
+        KubernetesClusterAddWorker worker = spyForFailure();
+        worker.finalNodeIds.add(2L);
+        Mockito.doReturn(true).when(worker).waitForReadyNodes();
+        CloudRuntimeException e = worker.failNodesAddition(List.of(1L, 2L), List.of(1L), false);
+        String msg = "Failed to add 1 of 2 nodes to Kubernetes cluster k8s (uuid-k8s). Not added: node-a (uuid-a). Added: node-b (uuid-b)";
+        Assert.assertEquals(msg, e.getMessage());
+        InOrder inOrder = Mockito.inOrder(worker);
+        inOrder.verify(worker).detachCksIsoFromNodesAddedToCluster(List.of(1L), 0L, false);
+        inOrder.verify(worker).waitForReadyNodes();
+        inOrder.verify(worker).detachCksIsoFromNodesAddedToCluster(List.of(2L), 0L, false);
+        inOrder.verify(worker).recordNodesAdditionFailure(msg);
+    }
+
+    @Test
+    public void testFailNodesAdditionKeepsVirtualRouterIsoUntilReadyOnPartialAdd() {
+        KubernetesClusterAddWorker worker = spyForFailure();
+        worker.finalNodeIds.add(2L);
+        Mockito.doReturn(false).when(worker).waitForReadyNodes();
+        CloudRuntimeException e = worker.failNodesAddition(List.of(1L, 2L), List.of(1L), true);
+        Assert.assertTrue(e.getMessage().endsWith("Added: node-b (uuid-b). Not every node of the cluster was Ready before the add-node timeout, so the added nodes may not have joined"));
+        InOrder inOrder = Mockito.inOrder(worker);
+        inOrder.verify(worker).waitForReadyNodes();
+        inOrder.verify(worker).detachCksIsoFromNodesAddedToCluster(List.of(2L), 0L, true);
+        inOrder.verify(worker).recordNodesAdditionFailure(e.getMessage());
+        Mockito.verify(worker, Mockito.times(1)).detachCksIsoFromNodesAddedToCluster(Mockito.anyList(), Mockito.anyLong(), Mockito.anyBoolean());
+    }
+
+    @Test
+    public void testFailNodesAdditionDetachesWhenReadyCheckThrows() {
+        KubernetesClusterAddWorker worker = spyForFailure();
+        worker.finalNodeIds.add(2L);
+        Mockito.doThrow(new CloudRuntimeException("no ssh")).when(worker).waitForReadyNodes();
+        CloudRuntimeException e = worker.failNodesAddition(List.of(1L, 2L), List.of(1L), false);
+        Assert.assertTrue(e.getMessage().endsWith(". Could not check whether the added nodes joined: no ssh"));
+        Mockito.verify(worker).detachCksIsoFromNodesAddedToCluster(List.of(2L), 0L, false);
+    }
+
+    @Test
+    public void testFailNodesAdditionDetachesAtOnceWhenNoNodeAdded() {
+        KubernetesClusterAddWorker worker = spyForFailure();
+        CloudRuntimeException e = worker.failNodesAddition(List.of(1L), List.of(1L), false);
+        Assert.assertEquals("Failed to add 1 of 1 nodes to Kubernetes cluster k8s (uuid-k8s). Not added: node-a (uuid-a). Added: none", e.getMessage());
+        Mockito.verify(worker, Mockito.never()).waitForReadyNodes();
+        Mockito.verify(worker).detachCksIsoFromNodesAddedToCluster(List.of(1L), 0L, false);
+    }
+
+    @Test
+    public void testFailNodesAdditionDetachesVirtualRouterIsoWhenNoNodeAdded() {
+        KubernetesClusterAddWorker worker = spyForFailure();
+        worker.failNodesAddition(List.of(1L), List.of(1L), true);
+        Mockito.verify(worker, Mockito.never()).waitForReadyNodes();
+        Mockito.verify(worker).detachCksIsoFromNodesAddedToCluster(Mockito.anyList(), Mockito.eq(0L), Mockito.eq(true));
+    }
+
+    @Test
+    public void testFailNodesAdditionKeepsMessageWhenDetachFails() {
+        KubernetesClusterAddWorker worker = spyForFailure();
+        Mockito.doThrow(new CloudRuntimeException("detach")).when(worker).detachCksIsoFromNodesAddedToCluster(Mockito.anyList(), Mockito.anyLong(), Mockito.anyBoolean());
+        CloudRuntimeException e = worker.failNodesAddition(List.of(1L), List.of(1L), false);
+        Assert.assertTrue(e.getMessage().startsWith("Failed to add 1 of 1 nodes"));
+        Mockito.verify(worker).recordNodesAdditionFailure(e.getMessage());
     }
 }
