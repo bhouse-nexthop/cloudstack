@@ -75,6 +75,8 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
 
     List<Long> finalNodeIds = new ArrayList<>();
 
+    private static final int EVENT_DESCRIPTION_MAX_LENGTH = 1024;
+
     public KubernetesClusterAddWorker(KubernetesCluster kubernetesCluster, KubernetesClusterManagerImpl clusterManager) {
         super(kubernetesCluster, clusterManager);
     }
@@ -111,18 +113,9 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
             updateKubernetesCluster(kubernetesCluster.getId(), nodesAddedAndMemory, manualUpgrade);
             List<Long> failedNodeIds = nodeIds.stream().filter(nodeId -> !finalNodeIds.contains(nodeId)).collect(Collectors.toList());
             if (!failedNodeIds.isEmpty()) {
-                String msg = getNodesNotAddedMessage(nodeIds.size(), failedNodeIds);
-                recordNodesAdditionFailure(msg);
-                try {
-                    detachCksIsoFromNodesAddedToCluster(nodeIds, kubernetesCluster.getId(), mountCksIsoOnVr);
-                } catch (Exception e) {
-                    logger.error(String.format("Failed to detach the CKS ISO after failing to add nodes to Kubernetes cluster %s", kubernetesCluster.getName()), e);
-                }
-                throw new CloudRuntimeException(msg);
+                throw failNodesAddition(nodeIds, failedNodeIds, mountCksIsoOnVr);
             }
-            Pair<String, Integer> publicIpSshPort = getKubernetesClusterServerIpSshPort(null);
-            KubernetesClusterUtil.validateKubernetesClusterReadyNodesCount(kubernetesCluster, publicIpSshPort.first(), publicIpSshPort.second(),
-                    getControlNodeLoginUser(), sshKeyFile, addNodeTimeoutTime, 15000);
+            waitForReadyNodes();
             deleteJoinToken();
             detachCksIsoFromNodesAddedToCluster(nodeIds, kubernetesCluster.getId(), mountCksIsoOnVr);
             stateTransitTo(kubernetesCluster.getId(), KubernetesCluster.Event.OperationSucceeded);
@@ -168,14 +161,54 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
                 describeNodes(failedNodeIds), describeNodes(finalNodeIds));
     }
 
+    protected boolean waitForReadyNodes() {
+        Pair<String, Integer> publicIpSshPort = getKubernetesClusterServerIpSshPort(null);
+        return KubernetesClusterUtil.validateKubernetesClusterReadyNodesCount(kubernetesCluster, publicIpSshPort.first(), publicIpSshPort.second(),
+                getControlNodeLoginUser(), sshKeyFile, addNodeTimeoutTime, 15000);
+    }
+
+    /**
+     * Nodes that were added keep the CKS ISO until they are Ready: they were rebooted to join and need its binaries,
+     * so it is detached from them only after the same wait as a fully successful add.
+     */
+    protected CloudRuntimeException failNodesAddition(List<Long> nodeIds, List<Long> failedNodeIds, boolean mountCksIsoOnVr) {
+        String msg = getNodesNotAddedMessage(nodeIds.size(), failedNodeIds);
+        if (!mountCksIsoOnVr) {
+            detachCksIsoAfterFailure(failedNodeIds, false);
+        }
+        if (!finalNodeIds.isEmpty()) {
+            try {
+                if (!waitForReadyNodes()) {
+                    msg += ". Not every node of the cluster was Ready before the add-node timeout, so the added nodes may not have joined";
+                }
+            } catch (Exception e) {
+                logger.error(String.format("Failed to check ready nodes of Kubernetes cluster %s", kubernetesCluster.getName()), e);
+                msg += String.format(". Could not check whether the added nodes joined: %s", Objects.toString(e.getMessage(), e.getClass().getSimpleName()));
+            }
+        }
+        if (mountCksIsoOnVr || !finalNodeIds.isEmpty()) {
+            detachCksIsoAfterFailure(finalNodeIds, mountCksIsoOnVr);
+        }
+        recordNodesAdditionFailure(msg);
+        return new CloudRuntimeException(msg);
+    }
+
+    private void detachCksIsoAfterFailure(List<Long> nodeIds, boolean mountCksIsoOnVr) {
+        try {
+            detachCksIsoFromNodesAddedToCluster(nodeIds, kubernetesCluster.getId(), mountCksIsoOnVr);
+        } catch (Exception e) {
+            logger.error(String.format("Failed to detach the CKS ISO after failing to add nodes to Kubernetes cluster %s", kubernetesCluster.getName()), e);
+        }
+    }
+
     protected void recordNodesAdditionFailure(String msg) {
         logger.error(msg);
         ActionEventUtils.onCompletedActionEvent(CallContext.current().getCallingUserId(), CallContext.current().getCallingAccountId(),
                 EventVO.LEVEL_ERROR, KubernetesClusterEventTypes.EVENT_KUBERNETES_CLUSTER_NODES_ADD,
-                msg, kubernetesCluster.getId(), ApiCommandResourceType.KubernetesCluster.toString(), 0);
+                org.apache.commons.lang3.StringUtils.abbreviate(msg, EVENT_DESCRIPTION_MAX_LENGTH), kubernetesCluster.getId(), ApiCommandResourceType.KubernetesCluster.toString(), 0);
     }
 
-    private void detachCksIsoFromNodesAddedToCluster(List<Long> nodeIds, long kubernetesClusterId, boolean mountCksIsoOnVr) {
+    protected void detachCksIsoFromNodesAddedToCluster(List<Long> nodeIds, long kubernetesClusterId, boolean mountCksIsoOnVr) {
         if (mountCksIsoOnVr) {
             detachIsoOnVirtualRouter(kubernetesClusterId);
         } else {
