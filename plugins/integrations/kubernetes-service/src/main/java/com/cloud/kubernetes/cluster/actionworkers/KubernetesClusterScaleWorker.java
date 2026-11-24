@@ -532,7 +532,15 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
                     kubernetesClusterVmMapDao.expunge(vmMapVO.getId());
                     removed.add(userVM);
                 }
-                boolean sshRulesRemoved = sshIp == null || removeNodeSshRules(sshIp, nodeSshRules, network.getVpcId() == null);
+                boolean sshRulesRemoved = true;
+                if (sshIp != null) {
+                    try {
+                        sshRulesRemoved = removeNodeSshRules(sshIp, nodeSshRules, network.getVpcId() == null);
+                    } catch (RuntimeException e) {
+                        logger.error("Failed to remove the SSH network rules of VM {} of Kubernetes cluster {}", userVM, kubernetesCluster, e);
+                        sshRulesRemoved = false;
+                    }
+                }
                 if (!sshRulesRemoved) {
                     logTransitStateAndThrow(Level.ERROR, String.format("Scaling Kubernetes cluster %s failed, unable to remove the SSH network rules of VM %s",
                             kubernetesCluster, userVM), kubernetesCluster.getId(), KubernetesCluster.Event.OperationFailed);
