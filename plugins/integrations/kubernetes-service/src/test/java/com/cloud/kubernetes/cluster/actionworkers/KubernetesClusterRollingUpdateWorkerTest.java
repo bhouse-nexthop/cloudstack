@@ -1287,19 +1287,46 @@ public class KubernetesClusterRollingUpdateWorkerTest {
                 new String(org.apache.commons.codec.binary.Base64.decodeBase64(userData)));
     }
 
+    private KubernetesClusterRollingUpdateWorker workerPrinting(String endpoint, String certificateCheck) {
+        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
+        Mockito.doReturn("kubeadm join " + endpoint + ":6443 --token fresh1.0123456789abcdef --discovery-token-ca-cert-hash " + JOIN_HASH + " \n")
+                .when(worker).runKubectl(Mockito.startsWith("sudo /opt/bin/kubeadm token create"));
+        Mockito.doReturn(certificateCheck).when(worker).runKubectl(Mockito.startsWith("echo | timeout 10 openssl s_client -connect 10.1.1.1:6443 "));
+        return worker;
+    }
+
     @Test
-    public void aRecreatedWorkerJoinsOnTheEndpointKubeadmPrints() {
+    public void aRecreatedWorkerJoinsOnThePrintedEndpointIfTheCertificateDoesNotCoverItsAddress() {
         setUpNewWorkerTemplate(Storage.TemplateType.USER);
         addStackedControlPlane(1);
         UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
-        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
-        Mockito.doReturn("kubeadm join 203.0.113.5:6443 --token fresh1.0123456789abcdef --discovery-token-ca-cert-hash " + JOIN_HASH + " \n")
-                .when(worker).runKubectl(Mockito.startsWith("sudo /opt/bin/kubeadm token create"));
 
-        Assert.assertTrue(worker.rollout());
+        Assert.assertTrue(workerPrinting("203.0.113.5", "IP 10.1.1.1 does NOT match certificate\n").rollout());
 
         Assert.assertTrue(vmUserData.get(w1.getId()), vmUserData.get(w1.getId()).contains(
                 "kubeadm join 203.0.113.5:6443 --token fresh1.0123456789abcdef --discovery-token-ca-cert-hash " + JOIN_HASH));
+    }
+
+    @Test
+    public void aRecreatedWorkerKeepsItsAddressIfTheCertificateCoversIt() {
+        setUpNewWorkerTemplate(Storage.TemplateType.USER);
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+
+        Assert.assertTrue(workerPrinting("203.0.113.5", "IP 10.1.1.1 does match certificate\n").rollout());
+
+        Assert.assertTrue(vmUserData.get(w1.getId()), vmUserData.get(w1.getId()).contains("kubeadm join 10.1.1.1:6443 --token fresh1.0123456789abcdef"));
+    }
+
+    @Test
+    public void aRecreatedWorkerKeepsItsAddressIfTheCertificateCanNotBeChecked() {
+        setUpNewWorkerTemplate(Storage.TemplateType.USER);
+        addStackedControlPlane(1);
+        UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
+
+        Assert.assertTrue(workerPrinting("203.0.113.5", null).rollout());
+
+        Assert.assertTrue(vmUserData.get(w1.getId()), vmUserData.get(w1.getId()).contains("kubeadm join 10.1.1.1:6443 --token fresh1.0123456789abcdef"));
     }
 
     @Test
@@ -1307,9 +1334,7 @@ public class KubernetesClusterRollingUpdateWorkerTest {
         setUpNewWorkerTemplate(Storage.TemplateType.USER);
         addStackedControlPlane(1);
         UserVmVO w1 = addNode("w1", WORKER, NEW_OFFERING);
-        KubernetesClusterRollingUpdateWorker worker = newWorker(1);
-        Mockito.doReturn("kubeadm join api.example.com:6443 --token fresh1.0123456789abcdef --discovery-token-ca-cert-hash " + JOIN_HASH + " \n")
-                .when(worker).runKubectl(Mockito.startsWith("sudo /opt/bin/kubeadm token create"));
+        KubernetesClusterRollingUpdateWorker worker = workerPrinting("api.example.com", "IP 10.1.1.1 does NOT match certificate\n");
 
         Assert.assertTrue(worker.rollout());
 
