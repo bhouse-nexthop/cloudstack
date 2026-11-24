@@ -1296,6 +1296,41 @@ public class KubernetesClusterActionWorker {
         joinCaCertHash = tokenAndHash.second();
     }
 
+    /**
+     * Whether the API server certificate served on the IP is valid for it, as a join that pins the CA needs,
+     * or null if that can not be told.
+     */
+    protected Boolean isApiServerCertificateValidFor(final String ip) {
+        String command = String.format("echo | timeout 10 openssl s_client -connect %s:%d 2>/dev/null | openssl x509 -noout -checkip %s; true",
+                ip, CLUSTER_API_PORT, ip);
+        try {
+            Pair<String, Integer> publicIpSshPort = getKubernetesClusterServerIpSshPort(null);
+            Pair<Boolean, String> result = SshHelper.sshExecute(publicIpSshPort.first(), publicIpSshPort.second(), getControlNodeLoginUser(),
+                    getManagementServerSshPublicKeyFile(), null, command, 10000, 10000, 30000);
+            return KubernetesClusterUtil.parseCertificateCheckIp(result.second(), ip);
+        } catch (Exception e) {
+            logger.warn("Unable to check the API server certificate of Kubernetes cluster {} on {}", kubernetesCluster, ip, e);
+            return null;
+        }
+    }
+
+    /**
+     * The API server address nodes join on: the control node's own IP, as at create, unless the API server
+     * certificate is known not to be valid for it (external etcd clusters created before it was added).
+     * Then the address kubeadm prints with the join command, which the certificate always covers.
+     */
+    protected String getNodeJoinIp() {
+        final String controlNodeIp = getControlVmPrivateIp();
+        if (controlNodeIp == null) {
+            return joinEndpointIp;
+        }
+        if (joinEndpointIp == null || joinEndpointIp.equals(controlNodeIp) || !Boolean.FALSE.equals(isApiServerCertificateValidFor(controlNodeIp))) {
+            return controlNodeIp;
+        }
+        logger.info("The API server certificate of Kubernetes cluster {} is not valid for {}, nodes join on {}", kubernetesCluster, controlNodeIp, joinEndpointIp);
+        return joinEndpointIp;
+    }
+
     protected void deleteJoinToken() {
         if (joinToken == null) {
             return;

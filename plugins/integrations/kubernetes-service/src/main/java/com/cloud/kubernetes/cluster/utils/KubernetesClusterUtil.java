@@ -434,6 +434,20 @@ public class KubernetesClusterUtil {
     }
 
     /**
+     * Parses the output of openssl x509 -checkip.
+     * @return whether the certificate is valid for the IP, or null if the output does not say
+     */
+    public static Boolean parseCertificateCheckIp(final String output, final String ip) {
+        if (StringUtils.isBlank(output)) {
+            return null;
+        }
+        if (output.contains(String.format("IP %s does NOT match certificate", ip))) {
+            return false;
+        }
+        return output.contains(String.format("IP %s does match certificate", ip)) ? true : null;
+    }
+
+    /**
      * Parses the output of kubeadm token create --print-join-command.
      * @return the token and the CA certificate hash, or null if either is missing
      */
