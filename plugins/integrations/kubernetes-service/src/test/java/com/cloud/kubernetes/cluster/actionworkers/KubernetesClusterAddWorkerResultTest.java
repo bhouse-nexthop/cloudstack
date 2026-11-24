@@ -119,6 +119,7 @@ public class KubernetesClusterAddWorkerResultTest {
         KubernetesClusterAddWorker worker = Mockito.spy(addWorker);
         Mockito.doNothing().when(worker).recordNodesAdditionFailure(Mockito.anyString());
         Mockito.doNothing().when(worker).detachCksIsoFromNodesAddedToCluster(Mockito.anyList(), Mockito.anyLong(), Mockito.anyBoolean());
+        Mockito.lenient().doNothing().when(worker).deleteJoinToken();
         return worker;
     }
 
@@ -133,6 +134,7 @@ public class KubernetesClusterAddWorkerResultTest {
         InOrder inOrder = Mockito.inOrder(worker);
         inOrder.verify(worker).detachCksIsoFromNodesAddedToCluster(List.of(1L), 0L, false);
         inOrder.verify(worker).waitForReadyNodes();
+        inOrder.verify(worker).deleteJoinToken();
         inOrder.verify(worker).detachCksIsoFromNodesAddedToCluster(List.of(2L), 0L, false);
         inOrder.verify(worker).recordNodesAdditionFailure(msg);
     }
@@ -168,6 +170,7 @@ public class KubernetesClusterAddWorkerResultTest {
         Assert.assertEquals("Failed to add 1 of 1 nodes to Kubernetes cluster k8s (uuid-k8s). Not added: node-a (uuid-a). Added: none", e.getMessage());
         Mockito.verify(worker, Mockito.never()).waitForReadyNodes();
         Mockito.verify(worker).detachCksIsoFromNodesAddedToCluster(List.of(1L), 0L, false);
+        Mockito.verify(worker, Mockito.never()).deleteJoinToken();
     }
 
     @Test

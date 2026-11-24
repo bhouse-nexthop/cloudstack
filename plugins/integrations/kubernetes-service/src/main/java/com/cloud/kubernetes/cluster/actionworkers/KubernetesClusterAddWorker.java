@@ -185,6 +185,7 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
                 logger.error(String.format("Failed to check ready nodes of Kubernetes cluster %s", kubernetesCluster.getName()), e);
                 msg += String.format(". Could not check whether the added nodes joined: %s", Objects.toString(e.getMessage(), e.getClass().getSimpleName()));
             }
+            deleteJoinToken();
         }
         if (mountCksIsoOnVr || !finalNodeIds.isEmpty()) {
             detachCksIsoAfterFailure(finalNodeIds, mountCksIsoOnVr);
