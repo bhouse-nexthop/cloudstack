@@ -101,7 +101,7 @@ public class KubernetesClusterAddWorker extends KubernetesClusterActionWorker {
             transitToOperationState(KubernetesCluster.Event.AddNodeRequested);
             createJoinToken(KubernetesClusterService.KubernetesClusterAddNodeTimeout.value());
             // rendered once the join token exists, as it is part of the user data
-            String base64UserData = getNodeUserData(getControlVmPrivateIp(), mountCksIsoOnVr);
+            String base64UserData = getNodeUserData(joinEndpointIp != null ? joinEndpointIp : getControlVmPrivateIp(), mountCksIsoOnVr);
             removeLeftoverNodeSshRules(network, publicIp, nodeIds);
             if (Objects.isNull(getFreeNodeSshPort(network, publicIp))) {
                 throw new CloudRuntimeException(String.format("No free port left on public IP %s for SSH to new nodes of Kubernetes cluster %s",

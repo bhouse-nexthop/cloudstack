@@ -279,8 +279,7 @@ write_files:
       apiVersion: kubeadm.k8s.io/v1beta3
       kind: ClusterConfiguration
       apiServer:
-        certSANs:
-        {{ k8s_control.server_ips }}
+        certSANs: {{ k8s_control.server_ips }}
       controlPlaneEndpoint: {{ k8s_control.server_ip }}:{{ k8s.api_server_port }}
       etcd:
         external:
@@ -295,7 +294,7 @@ write_files:
       nodeRegistration:
         criSocket: /run/containerd/containerd.sock
       localAPIEndpoint:
-        advertiseAddress: {{ k8s_control.server_ip }}
+        advertiseAddress: {{ k8s_control.node_ip }}
         bindPort: {{ k8s.api_server_port }}
       certificateKey: {{ k8s_control.certificate_key }}
 

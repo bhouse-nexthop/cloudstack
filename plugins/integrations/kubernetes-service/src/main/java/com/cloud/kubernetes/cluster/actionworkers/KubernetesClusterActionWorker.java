@@ -256,6 +256,7 @@ public class KubernetesClusterActionWorker {
     protected int sshPort;
     protected String joinToken;
     protected String joinCaCertHash;
+    protected String joinEndpointIp;
 
 
     protected final String deploySecretsScriptFilename = "deploy-cloudstack-secret";
@@ -1152,6 +1153,7 @@ public class KubernetesClusterActionWorker {
                     getManagementServerSshPublicKeyFile(), null, command, 10000, 10000, 60000);
             if (result.first()) {
                 tokenAndHash = KubernetesClusterUtil.parseJoinCommand(result.second());
+                joinEndpointIp = KubernetesClusterUtil.parseJoinEndpointIp(result.second());
             } else {
                 logger.warn("Failed to create a join token on Kubernetes cluster {}: {}", kubernetesCluster, result.second());
             }

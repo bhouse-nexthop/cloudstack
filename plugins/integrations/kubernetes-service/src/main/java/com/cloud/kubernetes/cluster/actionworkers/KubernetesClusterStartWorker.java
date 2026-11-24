@@ -163,19 +163,13 @@ public class KubernetesClusterStartWorker extends KubernetesClusterResourceModif
         final String installReattemptsCount = "{{ k8s.install.reattempts.count }}";
         final String externalEtcdNodes = "{{ etcd.unstacked_etcd }}";
         final String etcdEndpointList = "{{ etcd.etcd_endpoint_list }}";
-        final String k8sServerIp = "{{ k8s_control.server_ip }}";
         final String k8sApiPort = "{{ k8s.api_server_port }}";
-        final String certSans = "{{ k8s_control.server_ips }}";
         final String k8sCertificate = "{{ k8s_control.certificate_key }}";
         final String externalCniPlugin = "{{ k8s.external.cni.plugin }}";
         final String setupCsiDriver = "{{ k8s.setup.csi.driver }}";
         final String k8sVersionKey = "{{ k8s.version }}";
 
-        final List<String> addresses = new ArrayList<>();
-        addresses.add(controlNodeIp);
-        if (!serverIp.equals(controlNodeIp)) {
-            addresses.add(serverIp);
-        }
+        final List<String> addresses = getApiServerAddresses(controlNodeIp, serverIp);
 
         boolean externalEtcd = !etcdIps.isEmpty();
         final Certificate certificate = caManager.issueCertificate(null, Arrays.asList(hostName, "kubernetes",
@@ -212,15 +206,14 @@ public class KubernetesClusterStartWorker extends KubernetesClusterResourceModif
                     CLUSTER_API_PORT,
                     certificateKey);
         }
-        initArgs += String.format("--apiserver-cert-extra-sans=%s", serverIp);
+        initArgs += String.format("--apiserver-cert-extra-sans=%s", String.join(",", addresses));
         initArgs += String.format(" --kubernetes-version=%s", getKubernetesClusterVersion().getSemanticVersion());
         k8sControlNodeConfig = k8sControlNodeConfig.replace(clusterInitArgsKey, initArgs);
         k8sControlNodeConfig = k8sControlNodeConfig.replace(k8sVersionKey, getKubernetesClusterVersion().getSemanticVersion());
         k8sControlNodeConfig = k8sControlNodeConfig.replace(ejectIsoKey, String.valueOf(ejectIso));
         k8sControlNodeConfig = k8sControlNodeConfig.replace(etcdEndpointList, endpointList);
-        k8sControlNodeConfig = k8sControlNodeConfig.replace(k8sServerIp, serverIp);
+        k8sControlNodeConfig = setKubeadmApiServerAddresses(k8sControlNodeConfig, controlNodeIp, serverIp);
         k8sControlNodeConfig = k8sControlNodeConfig.replace(k8sApiPort, String.valueOf(CLUSTER_API_PORT));
-        k8sControlNodeConfig = k8sControlNodeConfig.replace(certSans, String.format("- %s", serverIp));
         k8sControlNodeConfig = k8sControlNodeConfig.replace(k8sCertificate, certificateKey);
         k8sControlNodeConfig = k8sControlNodeConfig.replace(externalCniPlugin, String.valueOf(externalCni));
         k8sControlNodeConfig = k8sControlNodeConfig.replace(setupCsiDriver, String.valueOf(setupCsi));
@@ -229,6 +222,28 @@ public class KubernetesClusterStartWorker extends KubernetesClusterResourceModif
         k8sControlNodeConfig = updateKubeConfigWithRegistryDetails(k8sControlNodeConfig);
 
         return new Pair<>(k8sControlNodeConfig, controlNodeIp);
+    }
+
+    static List<String> getApiServerAddresses(final String controlNodeIp, final String serverIp) {
+        final List<String> addresses = new ArrayList<>();
+        addresses.add(controlNodeIp);
+        if (!serverIp.equals(controlNodeIp)) {
+            addresses.add(serverIp);
+        }
+        return addresses;
+    }
+
+    /**
+     * Clients reach the API on serverIp (the public IP or load balancer), which stays the
+     * controlPlaneEndpoint. Nodes join on controlNodeIp, so the certificate covers both. With
+     * external etcd the API server advertises controlNodeIp, as kubeadm does by default in the
+     * stacked case, so the kubernetes Service does not point pods at the public IP.
+     */
+    static String setKubeadmApiServerAddresses(String config, final String controlNodeIp, final String serverIp) {
+        config = config.replace("{{ k8s_control.server_ip }}", serverIp);
+        config = config.replace("{{ k8s_control.node_ip }}", controlNodeIp);
+        return config.replace("{{ k8s_control.server_ips }}", getApiServerAddresses(controlNodeIp, serverIp).stream()
+                .map(ip -> "\"" + ip + "\"").collect(Collectors.joining(", ", "[", "]")));
     }
 
     private Pair<UserVm,String> createKubernetesControlNode(final Network network, String serverIp, List<Network.IpAddresses> etcdIps, Long domainId, Long accountId, Long asNumber) throws ManagementServerException,
