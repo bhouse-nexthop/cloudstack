@@ -96,6 +96,8 @@ public class KubernetesClusterScaleWorkerSshRulesTest {
         Mockito.lenient().when(kubernetesClusterVmMapDao.listByClusterId(CLUSTER_ID)).thenReturn(vmMaps);
         Mockito.lenient().when(firewallRulesDao.listByIp(IP_ID)).thenReturn(ipRules);
         Mockito.lenient().when(portForwardingRulesDao.listByIpAndNotRevoked(IP_ID)).thenReturn(pfRules);
+        Mockito.lenient().when(portForwardingRulesDao.findById(Mockito.anyLong())).thenThrow(
+                new NullPointerException("PortForwardingRulesDaoImpl.findById dereferences a removed rule"));
         Mockito.lenient().doReturn(sshIp).when(worker).getNodeSshIp();
         Mockito.lenient().doNothing().when(worker).provisionNodeSshFirewallRule(Mockito.any(), Mockito.anyInt(), Mockito.anyInt());
         Mockito.lenient().doNothing().when(worker).provisionPublicIpPortForwardingRule(Mockito.any(), Mockito.any(), Mockito.any(),
@@ -383,7 +385,7 @@ public class KubernetesClusterScaleWorkerSshRulesTest {
         FirewallRuleVO ownFirewallRule = firewallRule(201L, 2225, 2225, NetUtils.ALL_IP4_CIDRS);
         Mockito.when(firewallRulesDao.listByIpPurposePortsProtocolAndNotRevoked(IP_ID, 2225, 2225, NetUtils.TCP_PROTO, FirewallRule.Purpose.Firewall))
                 .thenReturn(List.of(ownFirewallRule));
-        Mockito.when(portForwardingRulesDao.findById(101L)).thenReturn(removed);
+        Mockito.when(portForwardingRulesDao.listByVm(4L)).thenReturn(List.of(removed));
 
         Assert.assertTrue(worker.removeNodeSshRules(sshIp, List.of(removed), true));
 
@@ -399,7 +401,7 @@ public class KubernetesClusterScaleWorkerSshRulesTest {
         FirewallRuleVO userRule = firewallRule(201L, 2225, 2225, "10.0.0.0/8");
         Mockito.when(firewallRulesDao.listByIpPurposePortsProtocolAndNotRevoked(IP_ID, 2225, 2225, NetUtils.TCP_PROTO, FirewallRule.Purpose.Firewall))
                 .thenReturn(List.of(userRule));
-        Mockito.when(portForwardingRulesDao.findById(101L)).thenReturn(removed);
+        Mockito.when(portForwardingRulesDao.listByVm(4L)).thenReturn(List.of(removed));
 
         Assert.assertTrue(worker.removeNodeSshRules(sshIp, List.of(removed), true));
 
@@ -410,7 +412,7 @@ public class KubernetesClusterScaleWorkerSshRulesTest {
     @Test
     public void removeNodeSshRulesSkipsRuleAlreadyRemovedWithVmAndFirewallInVpc() {
         PortForwardingRuleVO removed = sshRule(101L, 4L, 2225);
-        Mockito.when(portForwardingRulesDao.findById(101L)).thenReturn(null);
+        Mockito.when(portForwardingRulesDao.listByVm(4L)).thenReturn(List.of());
 
         Assert.assertTrue(worker.removeNodeSshRules(sshIp, List.of(removed), false));
 
@@ -420,9 +422,23 @@ public class KubernetesClusterScaleWorkerSshRulesTest {
     }
 
     @Test
+    public void removeNodeSshRulesAfterExpungeRevokesOnlyTheFirewallRule() {
+        PortForwardingRuleVO removed = sshRule(101L, 4L, 2225);
+        FirewallRuleVO ownFirewallRule = firewallRule(201L, 2225, 2225, NetUtils.ALL_IP4_CIDRS);
+        Mockito.when(firewallRulesDao.listByIpPurposePortsProtocolAndNotRevoked(IP_ID, 2225, 2225, NetUtils.TCP_PROTO, FirewallRule.Purpose.Firewall))
+                .thenReturn(List.of(ownFirewallRule));
+        Mockito.when(portForwardingRulesDao.listByVm(4L)).thenReturn(List.of());
+
+        Assert.assertTrue(worker.removeNodeSshRules(sshIp, List.of(removed), true));
+
+        Mockito.verify(firewallService).revokeIngressFirewallRule(201L, true);
+        Mockito.verifyNoInteractions(rulesService);
+    }
+
+    @Test
     public void removeNodeSshRulesReportsFailure() {
         PortForwardingRuleVO removed = sshRule(101L, 4L, 2225);
-        Mockito.when(portForwardingRulesDao.findById(101L)).thenReturn(removed);
+        Mockito.when(portForwardingRulesDao.listByVm(4L)).thenReturn(List.of(removed));
         Mockito.when(firewallRulesDao.listByIpPurposePortsProtocolAndNotRevoked(IP_ID, 2225, 2225, NetUtils.TCP_PROTO, FirewallRule.Purpose.Firewall))
                 .thenReturn(List.of());
         Mockito.when(rulesService.revokePortForwardingRule(101L, true)).thenThrow(new RuntimeException("boom"));

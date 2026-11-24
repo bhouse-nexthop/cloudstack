@@ -30,6 +30,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -647,9 +648,9 @@ public class KubernetesClusterResourceModifierActionWorker extends KubernetesClu
     }
 
     /**
-     * Revokes the given SSH port forwarding rules of nodes and, when firewall is true, the TCP firewall rules from
-     * 0.0.0.0/0 on the IP for exactly their ports. A wider firewall rule, such as the one for the nodes created with the
-     * cluster, is kept.
+     * Revokes those of the given SSH port forwarding rules of nodes that still exist (expunging a VM removes its own)
+     * and, when firewall is true, the TCP firewall rules from 0.0.0.0/0 on the IP for exactly their ports. A wider
+     * firewall rule, such as the one for the nodes created with the cluster, is kept.
      * @return false if a rule could not be revoked
      */
     protected boolean removeNodeSshRules(IpAddress sshIp, List<PortForwardingRuleVO> sshRules, boolean firewall) {
@@ -659,9 +660,10 @@ public class KubernetesClusterResourceModifierActionWorker extends KubernetesClu
             if (firewall) {
                 result &= removeNodeSshFirewallRules(sshIp, port, port);
             }
-            PortForwardingRuleVO current = portForwardingRulesDao.findById(sshRule.getId());
-            if (current != null && current.getState() != FirewallRule.State.Revoke) {
-                result &= revokeNodeSshRule(current);
+            Optional<PortForwardingRuleVO> current = portForwardingRulesDao.listByVm(sshRule.getVirtualMachineId()).stream()
+                    .filter(rule -> rule.getId() == sshRule.getId() && rule.getState() != FirewallRule.State.Revoke).findFirst();
+            if (current.isPresent()) {
+                result &= revokeNodeSshRule(current.get());
             }
         }
         return result;
