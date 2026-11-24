@@ -20,6 +20,8 @@ import static com.cloud.kubernetes.cluster.KubernetesServiceHelper.KubernetesClu
 import static com.cloud.kubernetes.cluster.KubernetesServiceHelper.KubernetesClusterNodeType.ETCD;
 import static com.cloud.kubernetes.cluster.KubernetesServiceHelper.KubernetesClusterNodeType.WORKER;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -67,6 +69,7 @@ import com.cloud.uservm.UserVm;
 import com.cloud.utils.Pair;
 import com.cloud.utils.component.ComponentContext;
 import com.cloud.utils.exception.CloudRuntimeException;
+import com.cloud.utils.net.NetUtils;
 import com.cloud.vm.UserVmVO;
 import com.cloud.vm.VMInstanceDetailVO;
 import com.cloud.vm.VirtualMachine;
@@ -107,9 +110,10 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
     protected static final String JOIN_TOKEN_DELETE_COMMAND = "sudo /opt/bin/kubeadm token delete %s";
     private static final Pattern JOIN_COMMAND_TOKEN = Pattern.compile("--token\\s+([a-z0-9]{6}\\.[a-z0-9]{16})(?!\\S)");
     private static final Pattern JOIN_COMMAND_CA_CERT_HASH = Pattern.compile("--discovery-token-ca-cert-hash\\s+(sha256:[0-9a-f]{64})(?!\\S)");
-    /** The token and CA verification arguments of the kubeadm join of a worker's user data, with or without a pinned CA */
+    private static final Pattern JOIN_COMMAND_ENDPOINT = Pattern.compile("kubeadm join ([0-9.]+):[0-9]+ --token ");
+    /** The API server address, token and CA verification arguments of the kubeadm join of a worker's user data, with or without a pinned CA */
     private static final Pattern USER_DATA_JOIN = Pattern.compile(
-            "(kubeadm join \\S+ --token )\\S+ (?:--discovery-token-unsafe-skip-ca-verification|--discovery-token-ca-cert-hash \\S+)");
+            "(?<join>kubeadm join )(?<ip>[^\\s:]+)(?<port>:[0-9]+ --token )\\S+ (?:--discovery-token-unsafe-skip-ca-verification|--discovery-token-ca-cert-hash \\S+)");
     protected static final int DRAIN_ATTEMPTS = 3;
     protected static final long POLL_WAIT = 15000;
     protected static final int MAX_ERROR_LENGTH = 1024;
@@ -187,6 +191,8 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
     protected boolean etcdReachable = true;
     /** The join token and CA certificate hash the recreated workers of a batch join with */
     protected Pair<String, String> recreateJoin;
+    /** The API server address the recreated workers of a batch join on */
+    protected String recreateJoinIp;
     /** The migrations this rollout applies, in their order */
     protected List<KubernetesClusterMigration> migrations = List.of();
 
@@ -547,7 +553,7 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
                 // with the token each one gets, before any node of the batch is touched
                 for (Node node : batch) {
                     if (node.recreate) {
-                        validateNodeUserDataLength(getJoinUserData(node.vm, recreateJoin.first(), recreateJoin.second()), WORKER);
+                        validateNodeUserDataLength(getJoinUserData(node.vm, recreateJoinIp, recreateJoin.first(), recreateJoin.second()), WORKER);
                     }
                 }
             }
@@ -613,6 +619,7 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
                 logger.warn("Unable to tell whether the recreated nodes of Kubernetes cluster {} are joining, so their join token is left to expire", kubernetesCluster, e);
             }
             recreateJoin = null;
+            recreateJoinIp = null;
             // a recreated VM that is not back needs the ISO to install from once started; a later rollout detaches it
             for (Node node : batch) {
                 if (node.isoAttached && node.back) {
@@ -723,7 +730,7 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
                 throw new CloudRuntimeException(String.format("the root disk of node %s has delete protection", name));
             }
         }
-        if (getJoinUserData(node.vm, "", "") == null) {
+        if (getJoinUserData(node.vm, null, "", "") == null) {
             throw new CloudRuntimeException(String.format("the user data of the VM of node %s has no kubeadm join to give a new join token", name));
         }
         if (templateDao.findById(node.vm.getTemplateId()) == null) {
@@ -907,7 +914,7 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
         vmInstanceDetailsDao.addDetail(node.vm.getId(), RECREATE_DETAIL, node.bootIdNow, false);
         // the token the VM joined with may be gone, as it expires
         final String oldUserData = node.vm.getUserData();
-        setUserData(node, getJoinUserData(node.vm, recreateJoin.first(), recreateJoin.second()));
+        setUserData(node, getJoinUserData(node.vm, recreateJoinIp, recreateJoin.first(), recreateJoin.second()));
         // as for new nodes, the system VM template is only let use while the node is deployed from it; the restore
         // checks the access of the caller
         final long callerId = CallContext.current().getCallingAccountId();
@@ -965,7 +972,7 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
 
     /**
      * Creates a join token on a control node for the recreated workers of a batch, valid for as long as the batch may
-     * take, and reads the hash of the cluster CA they pin
+     * take, and reads the hash of the cluster CA they pin and the API server address to join on
      */
     protected void createRecreateJoinToken() {
         String output = runKubectl(String.format(JOIN_TOKEN_CREATE_COMMAND, Math.max(getNodeTimeout(), 1)));
@@ -978,6 +985,10 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
             }
             throw new CloudRuntimeException(String.format("unable to create a join token on Kubernetes cluster %s", kubernetesCluster.getName()));
         }
+        recreateJoinIp = parseJoinEndpointIp(output);
+        if (recreateJoinIp == null) {
+            logger.warn("No usable API server address in the join command of Kubernetes cluster {}, recreated workers keep the one they joined on", kubernetesCluster);
+        }
     }
 
     protected void deleteRecreateJoinToken() {
@@ -988,6 +999,7 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
             logger.warn("Unable to delete the join token of the recreated nodes of Kubernetes cluster {}, it expires on its own", kubernetesCluster);
         }
         recreateJoin = null;
+        recreateJoinIp = null;
     }
 
     protected void setUserData(final Node node, final String userData) {
@@ -1011,16 +1023,40 @@ public class KubernetesClusterRollingUpdateWorker extends KubernetesClusterResou
     }
 
     /**
-     * The user data of a worker VM, base64 encoded, with its kubeadm join given a token and the CA hash to pin, or null
-     * if it has no kubeadm join
+     * The API server address of the output of kubeadm token create --print-join-command, or null. kubeadm prints the
+     * controlPlaneEndpoint if the cluster has one, else the advertise address, so the API server certificate is valid
+     * for it, which it may not be for the address a worker of an older cluster joined on.
      */
-    protected static String getJoinUserData(final UserVm vm, final String token, final String caCertHash) {
+    protected static String parseJoinEndpointIp(final String joinCommand) {
+        Matcher endpoint = StringUtils.isBlank(joinCommand) ? null : JOIN_COMMAND_ENDPOINT.matcher(joinCommand);
+        if (endpoint == null || !endpoint.find() || !NetUtils.isValidIp4(endpoint.group(1))) {
+            return null;
+        }
+        try {
+            InetAddress address = InetAddress.getByName(endpoint.group(1));
+            return address.isLoopbackAddress() || address.isAnyLocalAddress() || address.isLinkLocalAddress() || address.isMulticastAddress()
+                    || "255.255.255.255".equals(endpoint.group(1)) ? null : endpoint.group(1);
+        } catch (UnknownHostException e) {
+            return null;
+        }
+    }
+
+    /**
+     * The user data of a worker VM, base64 encoded, with its kubeadm join given the API server address (unless null,
+     * when the address it has is kept), a token and the CA hash to pin, or null if it has no kubeadm join
+     */
+    protected static String getJoinUserData(final UserVm vm, final String joinIp, final String token, final String caCertHash) {
         String userData = decodeUserData(vm);
         Matcher join = userData == null ? null : USER_DATA_JOIN.matcher(userData);
         if (join == null || !join.find()) {
             return null;
         }
-        userData = join.replaceAll("$1" + Matcher.quoteReplacement(token + " --discovery-token-ca-cert-hash " + caCertHash));
+        final String oldJoinIp = join.group("ip");
+        userData = join.replaceAll("${join}" + (joinIp == null ? "${ip}" : Matcher.quoteReplacement(joinIp)) + "${port}"
+                + Matcher.quoteReplacement(token + " --discovery-token-ca-cert-hash " + caCertHash));
+        if (joinIp != null) {
+            userData = userData.replace("ExecStartPre=/usr/bin/curl -k https://" + oldJoinIp + ":", "ExecStartPre=/usr/bin/curl -k https://" + joinIp + ":");
+        }
         return Base64.encodeBase64String(userData.getBytes(StandardCharsets.UTF_8));
     }
 
