@@ -16,9 +16,19 @@
 // under the License.
 package com.cloud.configuration;
 
+import java.util.Collections;
+import java.util.Map;
+
+import org.apache.cloudstack.context.CallContext;
+import org.junit.Assert;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import com.cloud.exception.InvalidParameterValueException;
+import com.cloud.user.Account;
+import com.cloud.user.AccountManager;
 import com.cloud.vm.VmDetailConstants;
 
 public class ConfigurationManagerOverCommitDetailTest {
@@ -64,7 +74,53 @@ public class ConfigurationManagerOverCommitDetailTest {
     }
 
     @Test(expected = InvalidParameterValueException.class)
+    public void testNaNIsRejected() {
+        validate("NaN");
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
+    public void testInfinityIsRejected() {
+        validate("Infinity");
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
     public void testNullIsRejected() {
         validate(null);
+    }
+
+    @Test
+    public void testDetailNameIsCanonicalisedInAnyCase() {
+        Assert.assertEquals(VmDetailConstants.CPU_OVER_COMMIT_RATIO, ConfigurationManagerImpl.overCommitRatioDetailName("CPUOVERCOMMITRATIO"));
+        Assert.assertEquals(VmDetailConstants.MEMORY_OVER_COMMIT_RATIO, ConfigurationManagerImpl.overCommitRatioDetailName("MemoryOvercommitRatio"));
+        Assert.assertNull(ConfigurationManagerImpl.overCommitRatioDetailName("rootdisksize"));
+    }
+
+    private void checkOverCommitRatiosAs(Account.Type type, Map<String, String> requested, Map<String, String> source) {
+        Account caller = Mockito.mock(Account.class);
+        Mockito.when(caller.getId()).thenReturn(42L);
+        AccountManager accountManager = Mockito.mock(AccountManager.class);
+        Mockito.when(accountManager.isRootAdmin(42L)).thenReturn(type == Account.Type.ADMIN);
+        ReflectionTestUtils.setField(configurationManager, "_accountMgr", accountManager);
+        CallContext callContext = Mockito.mock(CallContext.class);
+        Mockito.when(callContext.getCallingAccount()).thenReturn(caller);
+        try (MockedStatic<CallContext> callContextMock = Mockito.mockStatic(CallContext.class)) {
+            callContextMock.when(CallContext::current).thenReturn(callContext);
+            configurationManager.checkCallerMaySetOverCommitRatios(requested, source);
+        }
+    }
+
+    @Test
+    public void testRootAdminMaySetTheRatios() {
+        checkOverCommitRatiosAs(Account.Type.ADMIN, Map.of("cpuOvercommitRatio", "1"), Collections.emptyMap());
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
+    public void testDomainAdminMayNotSetTheRatios() {
+        checkOverCommitRatiosAs(Account.Type.DOMAIN_ADMIN, Map.of("MemoryOvercommitRatio", "1"), Collections.emptyMap());
+    }
+
+    @Test
+    public void testDomainAdminMaySetOtherDetails() {
+        checkOverCommitRatiosAs(Account.Type.DOMAIN_ADMIN, Map.of("rootdisksize", "10"), Collections.emptyMap());
     }
 }

@@ -73,6 +73,27 @@ public class VirtualMachineManagerOverCommitTest {
     // --- what the offering asks for ---
 
     @Test
+    public void testNonFiniteOfferingRatioInheritsTheCluster() {
+        // Float.parseFloat accepts these, and either would make the VM's charge zero
+        offeringSays(CPU, "NaN");
+        assertNull(vmManager.offeringOverCommitRatio(profile(), CPU, 10.0f));
+        offeringSays(CPU, "Infinity");
+        assertNull(vmManager.offeringOverCommitRatio(profile(), CPU, 10.0f));
+    }
+
+    @Test
+    public void testResolveOverCommitRatioPrefersTheOffering() {
+        offeringSays(CPU, "1");
+        assertEquals(1.0f, vmManager.resolveOverCommitRatio(OFFERING_ID, CPU, 10.0f), 1e-6);
+    }
+
+    @Test
+    public void testResolveOverCommitRatioFallsBackToTheCluster() {
+        offeringSays(CPU, null);
+        assertEquals(10.0f, vmManager.resolveOverCommitRatio(OFFERING_ID, CPU, 10.0f), 1e-6);
+    }
+
+    @Test
     public void testOfferingWithNoDetailInheritsTheCluster() {
         offeringSays(CPU, null);
         assertNull(vmManager.offeringOverCommitRatio(profile(), CPU, 10.0f));
@@ -170,7 +191,7 @@ public class VirtualMachineManagerOverCommitTest {
 
         vmManager.persistMemoryReclaimFlag(VM_ID, 1.0f);
 
-        Mockito.verify(vmInstanceDetailsDao).addDetail(VM_ID, RECLAIM, "true", true);
+        Mockito.verify(vmInstanceDetailsDao).addDetail(VM_ID, RECLAIM, "true", false);
     }
 
     @Test

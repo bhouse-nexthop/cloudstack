@@ -155,6 +155,24 @@ public interface CapacityManager {
     long scaleRequestForOffering(long serviceOfferingId, long clusterId, long requested, boolean forCpu);
 
     /**
+     * Parses an overcommit ratio set on a service offering. A usable ratio is a finite number of at
+     * least 1: 1 means not overcommitted, higher means oversubscribed by that factor.
+     *
+     * @return the ratio, or null if the value is missing or unusable
+     */
+    static Float parseOfferingOverCommitRatio(String value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            float ratio = Float.parseFloat(value);
+            return ratio >= 1 && !Float.isInfinite(ratio) ? ratio : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /**
      * @param pool storage pool
      * @param templateForVmCreation template that will be used for vm creation
      * @return total allocated capacity for the storage pool

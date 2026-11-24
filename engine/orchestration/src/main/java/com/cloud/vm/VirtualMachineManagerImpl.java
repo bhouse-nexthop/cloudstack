@@ -1857,30 +1857,36 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
      * kept off the overcommit: they are charged their full request and hold all of it.
      */
     protected Float offeringOverCommitRatio(VirtualMachineProfile vmProfile, String key, float clusterRatio) {
-        String offeringRatio = _serviceOfferingDetailsDao.getDetail(vmProfile.getServiceOfferingId(), key);
+        return offeringOverCommitRatio(vmProfile.getServiceOfferingId(), key, clusterRatio);
+    }
+
+    protected Float offeringOverCommitRatio(long serviceOfferingId, String key, float clusterRatio) {
+        String offeringRatio = _serviceOfferingDetailsDao.getDetail(serviceOfferingId, key);
         if (offeringRatio == null) {
             return null;
         }
-        float ratio;
-        try {
-            ratio = Float.parseFloat(offeringRatio);
-        } catch (NumberFormatException e) {
-            logger.warn("Ignoring {} of [{}] on service offering {}: it is not a number.",
-                    key, offeringRatio, vmProfile.getServiceOfferingId());
-            return null;
-        }
-        if (ratio < 1) {
+        Float ratio = CapacityManager.parseOfferingOverCommitRatio(offeringRatio);
+        if (ratio == null) {
             // rejected when the offering is created; only reachable by writing the detail directly
-            logger.warn("Ignoring {} of {} on service offering {}: it must be at least 1.",
-                    key, offeringRatio, vmProfile.getServiceOfferingId());
+            logger.warn("Ignoring {} of [{}] on service offering {}: it must be a finite number of at least 1.",
+                    key, offeringRatio, serviceOfferingId);
             return null;
         }
         if (ratio > clusterRatio) {
-            logger.info("Service offering {} declares {} of {}, more than its cluster's {}, so its VMs are "
+            logger.debug("Service offering {} declares {} of {}, more than its cluster's {}, so its VMs are "
                             + "oversubscribed further than the cluster default.",
-                    vmProfile.getServiceOfferingId(), key, ratio, clusterRatio);
+                    serviceOfferingId, key, ratio, clusterRatio);
         }
         return ratio;
+    }
+
+    /**
+     * The ratio a VM of this offering would run at in a cluster with the given ratio, without
+     * recording anything on the VM.
+     */
+    protected float resolveOverCommitRatio(long serviceOfferingId, String key, float clusterRatio) {
+        Float offeringRatio = offeringOverCommitRatio(serviceOfferingId, key, clusterRatio);
+        return offeringRatio != null ? offeringRatio : clusterRatio;
     }
 
     /**
@@ -1898,7 +1904,7 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         boolean disable = offeringRatio != null && offeringRatio <= 1f;
         VMInstanceDetailVO existing = vmInstanceDetailsDao.findDetail(vmId, VmDetailConstants.MEMORY_RECLAIM_DISABLED);
         if (disable && existing == null) {
-            vmInstanceDetailsDao.addDetail(vmId, VmDetailConstants.MEMORY_RECLAIM_DISABLED, "true", true);
+            vmInstanceDetailsDao.addDetail(vmId, VmDetailConstants.MEMORY_RECLAIM_DISABLED, "true", false);
         } else if (!disable && existing != null) {
             vmInstanceDetailsDao.removeDetail(vmId, VmDetailConstants.MEMORY_RECLAIM_DISABLED);
         }
@@ -5389,8 +5395,10 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         HostVO hostVo = _hostDao.findById(vm.getHostId());
 
         Long clustedId = hostVo.getClusterId();
-        Float memoryOvercommitRatio = CapacityManager.MemOverprovisioningFactor.valueIn(clustedId);
-        Float cpuOvercommitRatio = CapacityManager.CpuOverprovisioningFactor.valueIn(clustedId);
+        float memoryOvercommitRatio = resolveOverCommitRatio(newServiceOffering.getId(),
+                VmDetailConstants.MEMORY_OVER_COMMIT_RATIO, CapacityManager.MemOverprovisioningFactor.valueIn(clustedId));
+        float cpuOvercommitRatio = resolveOverCommitRatio(newServiceOffering.getId(),
+                VmDetailConstants.CPU_OVER_COMMIT_RATIO, CapacityManager.CpuOverprovisioningFactor.valueIn(clustedId));
         boolean divideMemoryByOverprovisioning = HypervisorGuruBase.VmMinMemoryEqualsMemoryDividedByMemOverprovisioningFactor.valueIn(clustedId);
         boolean divideCpuByOverprovisioning = HypervisorGuruBase.VmMinCpuSpeedEqualsCpuSpeedDividedByCpuOverprovisioningFactor.valueIn(clustedId);
 
@@ -5428,7 +5436,10 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
                 throw new CloudRuntimeException("Unable to scale vm due to " + (reconfigureAnswer == null ? "" : reconfigureAnswer.getDetails()));
             }
 
-            upgradeVmDb(vm.getId(), newServiceOffering, oldServiceOffering);
+            if (upgradeVmDb(vm.getId(), newServiceOffering, oldServiceOffering)) {
+                // the VM now runs at the new offering's ratio
+                updateOverCommitRatioForVmProfile(new VirtualMachineProfileImpl(_vmDao.findById(vm.getId())), clustedId);
+            }
 
             if (vm.getType().equals(VirtualMachine.Type.User)) {
                 _userVmMgr.generateUsageEvent(vm, vm.isDisplayVm(), EventTypes.EVENT_VM_DYNAMIC_SCALE);

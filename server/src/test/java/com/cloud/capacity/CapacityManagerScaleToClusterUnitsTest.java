@@ -16,61 +16,126 @@
 // under the License.
 package com.cloud.capacity;
 
-import org.junit.Test;
-
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.when;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.junit.Before;
+import org.junit.Test;
+import org.mockito.Mockito;
+import org.springframework.test.util.ReflectionTestUtils;
+
+import com.cloud.service.dao.ServiceOfferingDetailsDao;
+import com.cloud.utils.Pair;
+import com.cloud.vm.VmDetailConstants;
 
 /**
- * Capacity is counted in cluster-overcommitted units, so a VM started under a different
- * overcommit ratio to its cluster's has to be scaled before it is charged.
+ * Capacity is counted in cluster-overcommitted units, so a VM whose offering sets its own
+ * overcommit ratio has to be scaled before it is charged.
  */
 public class CapacityManagerScaleToClusterUnitsTest {
 
     private final CapacityManagerImpl capacityManager = new CapacityManagerImpl();
 
-    private long scale(long requested, String vmRatio, float clusterRatio) {
-        return capacityManager.scaleToClusterUnits(requested, vmRatio, clusterRatio);
+    private ServiceOfferingDetailsDao serviceOfferingDetailsDao;
+
+    @Before
+    public void setUp() {
+        serviceOfferingDetailsDao = Mockito.mock(ServiceOfferingDetailsDao.class);
+        ReflectionTestUtils.setField(capacityManager, "_serviceOfferingDetailsDao", serviceOfferingDetailsDao);
+    }
+
+    private long scale(long requested, Float offeringRatio, float clusterRatio) {
+        return capacityManager.scaleToClusterUnits(requested, offeringRatio, clusterRatio);
     }
 
     @Test
     public void testVmInheritingTheClusterRatioIsChargedAsRequested() {
-        assertEquals(4000L, scale(4000L, "10.0", 10.0f));
-        assertEquals(4000L, scale(4000L, "1.0", 1.0f));
-    }
-
-    @Test
-    public void testVmWithoutARatioIsChargedAsRequested() {
-        // no detail is only written when the VM's ratio equals its cluster's and neither
-        // overcommits, in which case the request is already in cluster units
+        assertEquals(4000L, scale(4000L, null, 10.0f));
         assertEquals(4000L, scale(4000L, null, 1.0f));
     }
 
     @Test
-    public void testUnreadableRatioDoesNotBreakTheCharge() {
-        assertEquals(4000L, scale(4000L, "not a number", 10.0f));
+    public void testOfferingMatchingItsClusterIsChargedAsRequested() {
+        assertEquals(4000L, scale(4000L, 10.0f, 10.0f));
     }
 
     @Test
     public void testUnovercommittedVmInAnOvercommittedClusterIsChargedItsFullShare() {
         // ratio 1 in a cluster overcommitted 10 times: the VM holds its whole request, so it must
         // occupy ten times the units of an equally sized neighbour running at the cluster ratio
-        assertEquals(40000L, scale(4000L, "1.0", 10.0f));
+        assertEquals(40000L, scale(4000L, 1.0f, 10.0f));
     }
 
     @Test
     public void testVmMoreOvercommittedThanItsClusterIsChargedLess() {
-        assertEquals(2000L, scale(4000L, "20.0", 10.0f));
+        assertEquals(2000L, scale(4000L, 20.0f, 10.0f));
     }
 
     @Test
-    public void testRatioLeftOverFromAnEarlierClusterSettingIsRescaled() {
-        // cluster was 4, is now 8: a VM started under 4 must still occupy the same real share
-        assertEquals(8000L, scale(4000L, "4.0", 8.0f));
+    public void testChargeFollowsTheClusterOfTheHost() {
+        // the same VM is charged by the cluster of the host it is on, so releasing the host it
+        // left after a migration undoes exactly what was charged there
+        assertEquals(8000L, scale(4000L, 1.0f, 2.0f));
+        assertEquals(16000L, scale(4000L, 1.0f, 4.0f));
+    }
+
+    private void offeringDetails(Map<String, String> details) {
+        when(serviceOfferingDetailsDao.listDetailsKeyPairs(eq(10L), anyList())).thenReturn(details);
+    }
+
+    private void offeringDetails(String cpu, String memory) {
+        Map<String, String> details = new HashMap<>();
+        if (cpu != null) {
+            details.put(VmDetailConstants.CPU_OVER_COMMIT_RATIO, cpu);
+        }
+        if (memory != null) {
+            details.put(VmDetailConstants.MEMORY_OVER_COMMIT_RATIO, memory);
+        }
+        offeringDetails(details);
     }
 
     @Test
-    public void testNonsenseRatiosFallBackToTheRequestedSize() {
-        assertEquals(4000L, scale(4000L, "0", 10.0f));
-        assertEquals(4000L, scale(4000L, "-1", 10.0f));
+    public void testGetOfferingOvercommitRatiosIgnoresUnusableValues() {
+        for (String value : List.of("NaN", "Infinity", "0.5", "0", "-1", "none")) {
+            offeringDetails(value, value);
+            Pair<Float, Float> ratios = capacityManager.getOfferingOvercommitRatios(10L);
+            assertNull(value, ratios.first());
+            assertNull(value, ratios.second());
+        }
+    }
+
+    @Test
+    public void testGetOfferingOvercommitRatiosReadsBoth() {
+        offeringDetails("1", null);
+        Pair<Float, Float> ratios = capacityManager.getOfferingOvercommitRatios(10L);
+        assertEquals(1.0f, ratios.first(), 1e-6);
+        assertNull(ratios.second());
+    }
+
+    @Test
+    public void testGetOfferingOvercommitRatiosReadsKeysStoredInAnotherCase() {
+        // offerings created before the keys were stored under their canonical name
+        Map<String, String> details = new HashMap<>();
+        details.put("CPUOVERCOMMITRATIO", "1");
+        details.put("MemoryOvercommitRatio", "2");
+        offeringDetails(details);
+        Pair<Float, Float> ratios = capacityManager.getOfferingOvercommitRatios(10L);
+        assertEquals(1.0f, ratios.first(), 1e-6);
+        assertEquals(2.0f, ratios.second(), 1e-6);
+    }
+
+    @Test
+    public void testGetOfferingOvercommitRatiosWithoutDetails() {
+        offeringDetails(null);
+        Pair<Float, Float> ratios = capacityManager.getOfferingOvercommitRatios(10L);
+        assertNull(ratios.first());
+        assertNull(ratios.second());
     }
 }
