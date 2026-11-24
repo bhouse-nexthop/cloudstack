@@ -1027,6 +1027,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
                     }
                     KubernetesClusterVmMapVO vmMapVO = vmMapById.get(vmIdResponseEntry.getKey());
                     kubernetesUserVmResponse.setExternalNode(vmMapVO.isExternalNode());
+                    kubernetesUserVmResponse.setControlNode(vmMapVO.isControlNode());
                     kubernetesUserVmResponse.setEtcdNode(vmMapVO.isEtcdNode());
                     kubernetesUserVmResponse.setNodeVersion(vmMapVO.getNodeVersion());
                     vmResponses.add(kubernetesUserVmResponse);
@@ -1560,25 +1561,29 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         if (clusterSize == kubernetesCluster.getNodeCount()) {
             return;
         }
-        if (kubernetesCluster.getState().equals(KubernetesCluster.State.Stopped)) { // Cannot scale stopped cluster currently for cluster size
-            throw new PermissionDeniedException(String.format("Kubernetes cluster : %s is in %s state", kubernetesCluster.getName(), kubernetesCluster.getState().toString()));
-        }
         if (clusterSize < 1) {
             throw new InvalidParameterValueException(String.format("Kubernetes cluster : %s cannot be scaled for size, %d", kubernetesCluster.getName(), clusterSize));
         }
+        final long workerNodeCount = getWorkerNodeCount(kubernetesCluster);
+        if (clusterSize == workerNodeCount) {
+            return;
+        }
+        if (kubernetesCluster.getState().equals(KubernetesCluster.State.Stopped)) { // Cannot scale stopped cluster currently for cluster size
+            throw new PermissionDeniedException(String.format("Kubernetes cluster : %s is in %s state", kubernetesCluster.getName(), kubernetesCluster.getState().toString()));
+        }
+        if (workerNodeCount == 0) {
+            throw new InvalidParameterValueException(String.format("Kubernetes cluster : %s has no worker nodes and can not be scaled", kubernetesCluster.getName()));
+        }
+        if (workerNodeCount != kubernetesCluster.getNodeCount()) {
+            throw new InvalidParameterValueException(String.format("Kubernetes cluster : %s records size %d but has %d worker nodes. Scale it to size %d first to correct this, then to the size wanted",
+                    kubernetesCluster.getName(), kubernetesCluster.getNodeCount(), workerNodeCount, workerNodeCount));
+        }
+        validateKubernetesClusterSizeNotBelowAddedNodes(kubernetesCluster, ApiConstants.SIZE, clusterSize);
         if (clusterSize + kubernetesCluster.getControlNodeCount() > maxClusterSize) {
             throw new InvalidParameterValueException(
                     String.format("Maximum cluster size can not exceed %d. Please contact your administrator", maxClusterSize));
         }
-        if (clusterSize < kubernetesCluster.getNodeCount()) { // Downscale
-            long externalNodeCount = kubernetesClusterVmMapDao.listByClusterId(kubernetesCluster.getId()).stream()
-                    .filter(KubernetesClusterVmMapVO::isExternalNode).count();
-            if (clusterSize < externalNodeCount) {
-                throw new InvalidParameterValueException(String.format("Kubernetes cluster : %s cannot be scaled to size %d, it has %d nodes added with addNodesToKubernetesCluster which scaling does not remove. Use removeNodesFromKubernetesCluster to remove them",
-                        kubernetesCluster.getName(), clusterSize, externalNodeCount));
-            }
-        }
-        if (clusterSize > kubernetesCluster.getNodeCount()) { // Upscale
+        if (clusterSize > workerNodeCount) { // Upscale
             VMTemplateVO template = templateDao.findById(kubernetesCluster.getTemplateId());
             if (template == null) {
                 throw new InvalidParameterValueException(String.format("Invalid Template associated with Kubernetes cluster : %s",  kubernetesCluster.getName()));
@@ -1586,6 +1591,30 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             if (CollectionUtils.isEmpty(templateJoinDao.newTemplateView(template, zone.getId(), true))) {
                 throw new InvalidParameterValueException(String.format("Template : %s associated with Kubernetes cluster : %s is not in Ready state for datacenter : %s", template.getName(), kubernetesCluster.getName(), zone.getName()));
             }
+        }
+    }
+
+    /**
+     * The worker node count from the cluster's VMs, which the scale worker also uses, as the stored count can be out of date
+     */
+    protected long getWorkerNodeCount(final KubernetesClusterVO kubernetesCluster) {
+        if (KubernetesCluster.State.Created.equals(kubernetesCluster.getState())) {
+            return kubernetesCluster.getNodeCount();
+        }
+        List<KubernetesClusterVmMapVO> clusterVMs = kubernetesClusterVmMapDao.listByClusterId(kubernetesCluster.getId());
+        // Clusters created before the control node flag existed have it unset on every VM, so their VMs can not be told apart
+        if (kubernetesCluster.getControlNodeCount() > 0 && clusterVMs.stream().noneMatch(KubernetesClusterVmMapVO::isControlNode)) {
+            return kubernetesCluster.getNodeCount();
+        }
+        return clusterVMs.stream().filter(vm -> !vm.isControlNode() && !vm.isEtcdNode()).count();
+    }
+
+    protected void validateKubernetesClusterSizeNotBelowAddedNodes(final KubernetesClusterVO kubernetesCluster, final String parameter, final long size) {
+        long externalNodeCount = kubernetesClusterVmMapDao.listByClusterId(kubernetesCluster.getId()).stream()
+                .filter(KubernetesClusterVmMapVO::isExternalNode).count();
+        if (size < externalNodeCount) {
+            throw new InvalidParameterValueException(String.format("Kubernetes cluster : %s cannot be scaled to %s %d, it has %d nodes added with addNodesToKubernetesCluster which scaling does not remove. Use removeNodesFromKubernetesCluster to remove them",
+                    kubernetesCluster.getName(), parameter, size, externalNodeCount));
         }
     }
 
@@ -1598,14 +1627,11 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         if (nodes.stream().anyMatch(KubernetesClusterVmMapVO::isExternalNode)) {
             throw new InvalidParameterValueException("nodeids can not include nodes added with addNodesToKubernetesCluster, use removeNodesFromKubernetesCluster to remove them");
         }
-        // Ensure there's always a control node
-        long controleNodesToRemove = nodes.stream().filter(x -> x.isControlNode()).count();
-        if (controleNodesToRemove >= kubernetesCluster.getControlNodeCount()) {
-            throw new InvalidParameterValueException("Can not remove all control nodes from a cluster");
+        if (nodes.stream().anyMatch(x -> x.isControlNode() || x.isEtcdNode())) {
+            throw new InvalidParameterValueException("nodeids can only include worker nodes, control and etcd nodes can not be removed by scaling");
         }
         // Ensure there's always a node
-        long nodesToRemove = nodes.stream().filter(x -> !x.isControlNode()).count();
-        if (nodesToRemove >= kubernetesCluster.getNodeCount()) {
+        if (nodes.size() >= getWorkerNodeCount(kubernetesCluster)) {
             throw new InvalidParameterValueException("Can not remove all nodes from a cluster");
         }
     }
@@ -1762,6 +1788,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             if (minSize < 1) {
                 throw new InvalidParameterValueException("Minsize must be at least than 1");
             }
+            validateKubernetesClusterSizeNotBelowAddedNodes(kubernetesCluster, ApiConstants.MIN_SIZE, minSize);
             if (maxSize <= minSize) {
                 throw new InvalidParameterValueException("Maxsize must be greater than minsize");
             }
@@ -1783,8 +1810,9 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
 
         validateKubernetesClusterScaleSize(kubernetesCluster, clusterSize, maxClusterSize, zone);
 
+        // A size equal to the recorded one is not a size change, even if the recorded size is out of date
         ensureResourceLimitsForScale(kubernetesCluster, serviceOfferingNodeTypeMap,
-                clusterSize != null ? clusterSize : null,
+                clusterSize != null && clusterSize == kubernetesCluster.getNodeCount() && !KubernetesCluster.State.Created.equals(kubernetesCluster.getState()) ? null : clusterSize,
                 kubernetesCluster.getAccountId());
         return kubernetesCluster;
     }

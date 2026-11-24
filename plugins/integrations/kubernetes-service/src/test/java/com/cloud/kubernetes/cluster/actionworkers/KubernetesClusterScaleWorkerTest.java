@@ -374,7 +374,6 @@ public class KubernetesClusterScaleWorkerTest {
     public void testGetWorkerNodesToRemoveForDownsize_singleRemoval() {
         KubernetesCluster kubernetesCluster = Mockito.mock(KubernetesCluster.class);
         KubernetesClusterManagerImpl clusterManager = Mockito.mock(KubernetesClusterManagerImpl.class);
-        Mockito.when(kubernetesCluster.getNodeCount()).thenReturn(3L);
         KubernetesClusterScaleWorker worker = new KubernetesClusterScaleWorker(kubernetesCluster, new java.util.HashMap<>(), 2L, null, false, null, null, clusterManager);
         worker.vmInstanceDao = vmInstanceDao;
         KubernetesClusterScaleWorker spyWorker = Mockito.spy(worker);
@@ -406,7 +405,6 @@ public class KubernetesClusterScaleWorkerTest {
     public void testGetWorkerNodesToRemoveForDownsize_noRemoval() {
         KubernetesCluster kubernetesCluster = Mockito.mock(KubernetesCluster.class);
 
-        Mockito.when(kubernetesCluster.getNodeCount()).thenReturn(3L);
         KubernetesClusterScaleWorker worker = new KubernetesClusterScaleWorker(kubernetesCluster, new java.util.HashMap<>(), 3L, null, false, null, null, clusterManager);
         worker.vmInstanceDao = vmInstanceDao;
         KubernetesClusterScaleWorker spyWorker = Mockito.spy(worker);
@@ -447,7 +445,6 @@ public class KubernetesClusterScaleWorkerTest {
 
     @Test
     public void testGetWorkerNodesToRemovePrefersNodesDown() {
-        Mockito.when(kubernetesCluster.getNodeCount()).thenReturn(4L);
         KubernetesClusterScaleWorker worker = new KubernetesClusterScaleWorker(kubernetesCluster, new java.util.HashMap<>(), 2L, null, false, null, null, clusterManager);
         worker.vmInstanceDao = vmInstanceDao;
         KubernetesClusterScaleWorker spyWorker = Mockito.spy(worker);
@@ -1091,6 +1088,7 @@ public class KubernetesClusterScaleWorkerTest {
         scaleWorker.kubernetesClusterDao = kubernetesClusterDao;
         scaleWorker = Mockito.spy(scaleWorker);
         Mockito.doNothing().when(scaleWorker).init();
+        Mockito.doNothing().when(scaleWorker).validateAndSyncWorkerNodeCount();
         Mockito.lenient().doReturn(clusterOfferingId).when(scaleWorker).getExistingOfferingIdForNodeType(Mockito.any(), Mockito.any());
         Mockito.lenient().doReturn(workerOfferingId).when(scaleWorker).getExistingOfferingIdForNodeType(WORKER, kubernetesCluster);
         Mockito.lenient().doReturn(true).when(scaleWorker).stateTransitTo(Mockito.anyLong(), Mockito.any());
@@ -1146,9 +1144,9 @@ public class KubernetesClusterScaleWorkerTest {
         return vm;
     }
 
-    private List<KubernetesClusterVmMapVO> getWorkerNodesToRemoveWithAddedNodes(long nodeCount, long newSize, List<KubernetesClusterVmMapVO> vmMaps) {
+    private List<KubernetesClusterVmMapVO> getWorkerNodesToRemoveWithAddedNodes(long controlNodeCount, long newSize, List<KubernetesClusterVmMapVO> vmMaps) {
         KubernetesCluster cluster = Mockito.mock(KubernetesCluster.class);
-        Mockito.when(cluster.getNodeCount()).thenReturn(nodeCount);
+        Mockito.when(cluster.getControlNodeCount()).thenReturn(controlNodeCount);
         KubernetesClusterScaleWorker worker = new KubernetesClusterScaleWorker(cluster, new java.util.HashMap<>(), newSize, null, false, null, null, clusterManager);
         worker.vmInstanceDao = vmInstanceDao;
         KubernetesClusterScaleWorker spyWorker = Mockito.spy(worker);
@@ -1169,41 +1167,172 @@ public class KubernetesClusterScaleWorkerTest {
         KubernetesClusterVmMapVO vm4 = mockWorkerVmMap(false);
         List<KubernetesClusterVmMapVO> vmMaps = Arrays.asList(control, vm1, added1, added2, vm2, vm3, vm4);
 
-        List<KubernetesClusterVmMapVO> toRemove = getWorkerNodesToRemoveWithAddedNodes(6L, 5L, vmMaps);
+        List<KubernetesClusterVmMapVO> toRemove = getWorkerNodesToRemoveWithAddedNodes(1L, 5L, vmMaps);
         Assert.assertEquals(List.of(vm4), toRemove);
 
-        toRemove = getWorkerNodesToRemoveWithAddedNodes(6L, 2L, vmMaps);
+        toRemove = getWorkerNodesToRemoveWithAddedNodes(1L, 2L, vmMaps);
         Assert.assertEquals(Arrays.asList(vm1, vm2, vm3, vm4), toRemove);
     }
 
-    @Test
-    public void testGetWorkerNodesToRemoveForDownsizeWithDriftedSize() {
-        KubernetesClusterVmMapVO vm1 = mockWorkerVmMap(false);
-        KubernetesClusterVmMapVO vm2 = mockWorkerVmMap(false);
-        KubernetesClusterVmMapVO vm3 = mockWorkerVmMap(false);
-        List<KubernetesClusterVmMapVO> vmMaps = Arrays.asList(vm1, mockWorkerVmMap(true), mockWorkerVmMap(true), vm2, vm3);
-        Assert.assertEquals(List.of(vm3), getWorkerNodesToRemoveWithAddedNodes(3L, 2L, vmMaps));
+    private KubernetesClusterVmMapVO mockNodeVmMap(long vmId, boolean control, boolean etcd, boolean external) {
+        KubernetesClusterVmMapVO vm = Mockito.mock(KubernetesClusterVmMapVO.class);
+        Mockito.lenient().when(vm.getVmId()).thenReturn(vmId);
+        Mockito.lenient().when(vm.isControlNode()).thenReturn(control);
+        Mockito.lenient().when(vm.isEtcdNode()).thenReturn(etcd);
+        Mockito.lenient().when(vm.isExternalNode()).thenReturn(external);
+        return vm;
+    }
+
+    // 1 control, 1 etcd, 3 CKS-created workers (ids 3-5) and 2 added nodes (ids 6-7)
+    private KubernetesClusterScaleWorker mockSyncWorker(long storedNodeCount, Long newSize, List<Long> removeNodeIds) {
+        KubernetesCluster cluster = Mockito.mock(KubernetesCluster.class);
+        Mockito.lenient().when(cluster.getId()).thenReturn(1L);
+        Mockito.lenient().when(cluster.getNodeCount()).thenReturn(storedNodeCount);
+        Mockito.lenient().when(cluster.getControlNodeCount()).thenReturn(1L);
+        Mockito.lenient().when(cluster.getEtcdNodeCount()).thenReturn(1L);
+        KubernetesClusterScaleWorker worker = new KubernetesClusterScaleWorker(cluster, new java.util.HashMap<>(), newSize, removeNodeIds, false, null, null, clusterManager);
+        worker.kubernetesClusterDao = Mockito.mock(KubernetesClusterDao.class);
+        worker.vmInstanceDao = vmInstanceDao;
+        worker.serviceOfferingDao = serviceOfferingDao;
+        KubernetesClusterScaleWorker spyWorker = Mockito.spy(worker);
+        Mockito.doReturn(Arrays.asList(mockNodeVmMap(1L, true, false, false), mockNodeVmMap(2L, false, true, false),
+                mockNodeVmMap(3L, false, false, false), mockNodeVmMap(4L, false, false, false), mockNodeVmMap(5L, false, false, false),
+                mockNodeVmMap(6L, false, false, true), mockNodeVmMap(7L, false, false, true))).when(spyWorker).getKubernetesClusterVMMaps();
+        return spyWorker;
     }
 
     @Test
-    public void testGetWorkerNodesToRemoveBelowAddedNodes() {
-        KubernetesClusterScaleWorker worker = new KubernetesClusterScaleWorker(Mockito.mock(KubernetesCluster.class), new java.util.HashMap<>(), 1L, null, false, null, null, clusterManager);
-        worker.kubernetesClusterDao = Mockito.mock(KubernetesClusterDao.class);
-        worker.vmInstanceDao = vmInstanceDao;
-        KubernetesClusterScaleWorker spyWorker = Mockito.spy(worker);
-        Mockito.doReturn(Arrays.asList(mockWorkerVmMap(false), mockWorkerVmMap(true), mockWorkerVmMap(true))).when(spyWorker).getKubernetesClusterVMMaps();
+    public void testValidateAndSyncWorkerNodeCountCorrectsDriftedSize() {
+        KubernetesClusterScaleWorker worker = mockSyncWorker(3L, 5L, null);
+        KubernetesClusterVO clusterVO = Mockito.mock(KubernetesClusterVO.class);
+        Mockito.when(clusterVO.getId()).thenReturn(1L);
+        Mockito.when(clusterVO.getCores()).thenReturn(8L);
+        Mockito.when(clusterVO.getMemory()).thenReturn(8192L);
+        Mockito.when(worker.kubernetesClusterDao.findById(1L)).thenReturn(clusterVO);
+        Mockito.when(worker.kubernetesCluster.getWorkerNodeServiceOfferingId()).thenReturn(2L);
+        ServiceOfferingVO workerOffering = Mockito.mock(ServiceOfferingVO.class);
+        Mockito.when(workerOffering.getCpu()).thenReturn(2);
+        Mockito.when(workerOffering.getRamSize()).thenReturn(1024);
+        Mockito.when(serviceOfferingDao.findById(2L)).thenReturn(workerOffering);
+
+        worker.validateAndSyncWorkerNodeCount();
+
+        Mockito.verify(clusterVO).setNodeCount(5L);
+        Mockito.verify(clusterVO).setCores(12L);
+        Mockito.verify(clusterVO).setMemory(10240L);
+        Mockito.verify(worker.kubernetesClusterDao).update(1L, clusterVO);
+    }
+
+    @Test
+    public void testValidateAndSyncWorkerNodeCountStoredSizePassedBack() {
+        KubernetesClusterScaleWorker worker = mockSyncWorker(3L, 3L, null);
+        Mockito.when(worker.kubernetesClusterDao.findById(1L)).thenReturn(Mockito.mock(KubernetesClusterVO.class));
+        Mockito.when(worker.kubernetesCluster.getWorkerNodeServiceOfferingId()).thenReturn(2L);
+        worker.validateAndSyncWorkerNodeCount();
+        Assert.assertEquals(5L, ReflectionTestUtils.getField(worker, "clusterSize"));
+    }
+
+    @Test
+    public void testValidateAndSyncWorkerNodeCountCorrectsControlAndEtcdCounts() {
+        KubernetesClusterScaleWorker worker = mockSyncWorker(4L, 4L, null);
+        Mockito.when(worker.kubernetesCluster.getControlNodeCount()).thenReturn(2L);
+        Mockito.when(worker.kubernetesCluster.getEtcdNodeCount()).thenReturn(2L);
+        Mockito.when(worker.kubernetesCluster.getControlNodeServiceOfferingId()).thenReturn(2L);
+        Mockito.when(worker.kubernetesCluster.getEtcdNodeServiceOfferingId()).thenReturn(2L);
+        Mockito.when(worker.kubernetesCluster.getWorkerNodeServiceOfferingId()).thenReturn(2L);
+        KubernetesClusterVO clusterVO = Mockito.mock(KubernetesClusterVO.class);
+        Mockito.when(clusterVO.getId()).thenReturn(1L);
+        Mockito.when(clusterVO.getCores()).thenReturn(8L);
+        Mockito.when(clusterVO.getMemory()).thenReturn(8192L);
+        Mockito.when(worker.kubernetesClusterDao.findById(1L)).thenReturn(clusterVO);
+        ServiceOfferingVO offering = Mockito.mock(ServiceOfferingVO.class);
+        Mockito.when(offering.getCpu()).thenReturn(2);
+        Mockito.when(offering.getRamSize()).thenReturn(1024);
+        Mockito.when(serviceOfferingDao.findById(2L)).thenReturn(offering);
+
+        worker.validateAndSyncWorkerNodeCount();
+
+        Mockito.verify(clusterVO).setControlNodeCount(1L);
+        Mockito.verify(clusterVO).setEtcdNodeCount(1L);
+        Mockito.verify(clusterVO).setNodeCount(5L);
+        Mockito.verify(clusterVO, Mockito.times(2)).setCores(6L);
+        Mockito.verify(clusterVO).setCores(10L);
+        Assert.assertEquals(5L, ReflectionTestUtils.getField(worker, "clusterSize"));
+    }
+
+    @Test
+    public void testValidateAndSyncWorkerNodeCountWithoutControlNodeFlags() {
+        KubernetesClusterScaleWorker worker = mockSyncWorker(3L, 3L, null);
+        Mockito.doReturn(Arrays.asList(mockNodeVmMap(1L, false, false, false), mockNodeVmMap(2L, false, true, false),
+                mockNodeVmMap(3L, false, false, false), mockNodeVmMap(4L, false, false, false), mockNodeVmMap(5L, false, false, false),
+                mockNodeVmMap(6L, false, false, true), mockNodeVmMap(7L, false, false, true))).when(worker).getKubernetesClusterVMMaps();
+        worker.validateAndSyncWorkerNodeCount();
+        Mockito.verify(worker.kubernetesClusterDao, Mockito.never()).update(Mockito.anyLong(), Mockito.any());
+        Assert.assertEquals(3L, ReflectionTestUtils.getField(worker, "clusterSize"));
+    }
+
+    @Test
+    public void testValidateAndSyncWorkerNodeCountNoDrift() {
+        KubernetesClusterScaleWorker worker = mockSyncWorker(5L, null, List.of(4L));
+        worker.validateAndSyncWorkerNodeCount();
+        Mockito.verify(worker.kubernetesClusterDao, Mockito.never()).update(Mockito.anyLong(), Mockito.any());
+        Assert.assertEquals(4L, ReflectionTestUtils.getField(worker, "clusterSize"));
+    }
+
+    private void assertValidateAndSyncFails(KubernetesClusterScaleWorker worker, String message) {
         try {
-            spyWorker.getWorkerNodesToRemove();
-            Assert.fail("Expected scaling below the added nodes to fail");
+            worker.validateAndSyncWorkerNodeCount();
+            Assert.fail("Expected the scale request to be rejected");
         } catch (CloudRuntimeException e) {
-            Assert.assertTrue(e.getMessage().contains("size 1 is below the 2 nodes added"));
+            Assert.assertTrue(e.getMessage(), e.getMessage().contains(message));
         }
+        Mockito.verify(worker.kubernetesClusterDao, Mockito.never()).update(Mockito.anyLong(), Mockito.any());
+    }
+
+    @Test
+    public void testValidateAndSyncWorkerNodeCountDriftedNewSize() {
+        assertValidateAndSyncFails(mockSyncWorker(3L, 4L, null), "records size 3 but has 5 worker nodes");
+    }
+
+    @Test
+    public void testValidateAndSyncWorkerNodeCountNoWorkerNodes() {
+        KubernetesClusterScaleWorker worker = mockSyncWorker(3L, 3L, null);
+        Mockito.doReturn(Arrays.asList(mockNodeVmMap(1L, true, false, false), mockNodeVmMap(2L, false, true, false))).when(worker).getKubernetesClusterVMMaps();
+        assertValidateAndSyncFails(worker, "it has no worker nodes");
+    }
+
+    @Test
+    public void testValidateAndSyncWorkerNodeCountBelowAddedNodes() {
+        assertValidateAndSyncFails(mockSyncWorker(5L, 1L, null), "size 1 is below the 2 nodes added");
+    }
+
+    @Test
+    public void testValidateAndSyncWorkerNodeCountRejectsRemovingAllNodes() {
+        KubernetesClusterScaleWorker worker = mockSyncWorker(5L, null, List.of(3L, 4L, 5L));
+        Mockito.doReturn(Arrays.asList(mockNodeVmMap(1L, true, false, false), mockNodeVmMap(3L, false, false, false),
+                mockNodeVmMap(4L, false, false, false), mockNodeVmMap(5L, false, false, false))).when(worker).getKubernetesClusterVMMaps();
+        assertValidateAndSyncFails(worker, "can not remove all nodes");
+    }
+
+    @Test
+    public void testValidateAndSyncWorkerNodeCountRejectsNonWorkerNodeIds() {
+        for (long nodeId : List.of(1L, 2L, 6L, 99L)) {
+            assertValidateAndSyncFails(mockSyncWorker(5L, null, List.of(3L, nodeId)), "only CKS-created worker nodes of the cluster can be removed");
+        }
+    }
+
+    @Test
+    public void testGetWorkerNodesToRemoveWithoutControlNodeFlags() {
+        KubernetesClusterVmMapVO unflaggedControl = mockWorkerVmMap(false);
+        KubernetesClusterVmMapVO vm1 = mockWorkerVmMap(false);
+        List<KubernetesClusterVmMapVO> vmMaps = Arrays.asList(unflaggedControl, vm1, mockWorkerVmMap(true), mockWorkerVmMap(true));
+        Assert.assertEquals(List.of(vm1), getWorkerNodesToRemoveWithAddedNodes(1L, 2L, vmMaps));
     }
 
     @Test
     public void testGetWorkerNodesToRemoveForUpsizeWithAddedNodes() {
         List<KubernetesClusterVmMapVO> vmMaps = Arrays.asList(mockWorkerVmMap(false), mockWorkerVmMap(true), mockWorkerVmMap(true), mockWorkerVmMap(false));
-        Assert.assertTrue(getWorkerNodesToRemoveWithAddedNodes(4L, 4L, vmMaps).isEmpty());
-        Assert.assertTrue(getWorkerNodesToRemoveWithAddedNodes(4L, 6L, vmMaps).isEmpty());
+        Assert.assertTrue(getWorkerNodesToRemoveWithAddedNodes(0L, 4L, vmMaps).isEmpty());
+        Assert.assertTrue(getWorkerNodesToRemoveWithAddedNodes(0L, 6L, vmMaps).isEmpty());
     }
 }
