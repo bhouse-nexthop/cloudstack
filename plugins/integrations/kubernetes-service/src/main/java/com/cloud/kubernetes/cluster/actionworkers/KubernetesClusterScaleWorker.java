@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -748,7 +749,7 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
         enterScalingState(KubernetesCluster.Event.ScaleDownRequested);
         List<KubernetesClusterVmMapVO> vmList;
         if (this.nodeIds != null) {
-            vmList = getKubernetesClusterVMMapsForNodes(this.nodeIds).stream().filter(vm -> !vm.isExternalNode()).collect(Collectors.toList());
+            vmList = getKubernetesClusterVMMapsForNodes(this.nodeIds);
         } else {
             vmList = getWorkerNodesToRemove();
             if (vmList.isEmpty()) {
@@ -789,29 +790,114 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
     public List<KubernetesClusterVmMapVO> getWorkerNodesToRemove() {
         List<KubernetesClusterVmMapVO> workerVMsMap = new ArrayList<>();
         int externalNodes = 0;
+        int controlNodes = 0;
         for (KubernetesClusterVmMapVO vm : getKubernetesClusterVMMaps()) {
             if (vm.isExternalNode()) {
                 externalNodes++;
-            } else if (!vm.isControlNode() && !vm.isEtcdNode()) {
+            } else if (vm.isControlNode()) {
+                controlNodes++;
+            } else if (!vm.isEtcdNode()) {
                 workerVMsMap.add(vm);
             }
         }
+        // Clusters created before the control node flag existed have it unset; their control VMs are the first ones created
+        int unflaggedControlNodes = (int) Math.max(0, Math.min(workerVMsMap.size(), kubernetesCluster.getControlNodeCount() - controlNodes));
+        List<KubernetesClusterVmMapVO> removableVMsMap = new ArrayList<>(workerVMsMap.subList(unflaggedControlNodes, workerVMsMap.size()));
         // Nodes are removed from the end of the list: put workers whose VMs are down last, so a
         // scale-down removes those first. The sort is stable, so the order is otherwise kept.
-        Set<Long> downVmIds = workerVMsMap.stream().map(KubernetesClusterVmMapVO::getVmId)
+        Set<Long> downVmIds = removableVMsMap.stream().map(KubernetesClusterVmMapVO::getVmId)
                 .filter(this::isVmDown).collect(Collectors.toSet());
-        workerVMsMap.sort(Comparator.comparing(vm -> downVmIds.contains(vm.getVmId())));
+        removableVMsMap.sort(Comparator.comparing(vm -> downVmIds.contains(vm.getVmId())));
         int desiredWorkerNodes = clusterSize == null ? (int) kubernetesCluster.getNodeCount() : clusterSize.intValue();
+        int totalWorkerNodes = removableVMsMap.size();
         // The cluster size also counts nodes added with addNodesToKubernetesCluster, which scaling never removes
-        if (desiredWorkerNodes < externalNodes) {
-            logTransitStateToFailedIfNeededAndThrow(Level.WARN, String.format("Scaling failed for Kubernetes cluster : %s, size %d is below the %d nodes added with addNodesToKubernetesCluster",
-                    kubernetesCluster.getName(), desiredWorkerNodes, externalNodes));
+        int toRemoveCount = Math.min(totalWorkerNodes, Math.max(0, totalWorkerNodes + externalNodes - desiredWorkerNodes));
+        return new ArrayList<>(removableVMsMap.subList(totalWorkerNodes - toRemoveCount, totalWorkerNodes));
+    }
+
+    /**
+     * Checks the request against the cluster's VMs and corrects the stored node counts, cores and memory
+     * if they no longer match the worker VMs, so the scale works from the real node count.
+     */
+    protected void validateAndSyncWorkerNodeCount() throws CloudRuntimeException {
+        if (KubernetesCluster.State.Created.equals(originalState)) {
+            return;
         }
-        int totalWorkerNodes = workerVMsMap.size();
-        // Never remove more than the requested drop, even if the stored size has drifted below the real node count
-        int requestedDrop = (int) kubernetesCluster.getNodeCount() - desiredWorkerNodes;
-        int toRemoveCount = Math.max(0, Math.min(requestedDrop, totalWorkerNodes + externalNodes - desiredWorkerNodes));
-        return new ArrayList<>(workerVMsMap.subList(totalWorkerNodes - toRemoveCount, totalWorkerNodes));
+        List<KubernetesClusterVmMapVO> clusterVMs = getKubernetesClusterVMMaps();
+        long storedNodes = kubernetesCluster.getNodeCount();
+        long controlNodes = clusterVMs.stream().filter(KubernetesClusterVmMapVO::isControlNode).count();
+        long etcdNodes = clusterVMs.stream().filter(KubernetesClusterVmMapVO::isEtcdNode).count();
+        long workerNodes = clusterVMs.stream().filter(vm -> !vm.isControlNode() && !vm.isEtcdNode()).count();
+        // Clusters created before the control node flag existed have it unset on every VM, so their VMs can not be told apart
+        boolean nodeTypesKnown = controlNodes > 0 || kubernetesCluster.getControlNodeCount() == 0;
+        if (!nodeTypesKnown) {
+            workerNodes = storedNodes;
+        }
+        long externalNodes = clusterVMs.stream().filter(KubernetesClusterVmMapVO::isExternalNode).count();
+        if (nodeIds == null && clusterSize != null && clusterSize == storedNodes) {
+            // The reported size was passed back unchanged (the UI always sends it), only correct the stored count
+            clusterSize = workerNodes;
+            if (clusterSize < 1) {
+                logAndThrow(Level.WARN, String.format("Scaling failed for Kubernetes cluster : %s, it has no worker nodes", kubernetesCluster.getName()));
+            }
+        } else if (nodeIds == null && clusterSize != null && clusterSize != workerNodes && workerNodes != storedNodes) {
+            logAndThrow(Level.WARN, String.format("Scaling failed for Kubernetes cluster : %s, it records size %d but has %d worker nodes. Scale it to size %d first to correct this, then to the size wanted",
+                    kubernetesCluster.getName(), storedNodes, workerNodes, workerNodes));
+        }
+        if (nodeIds != null) {
+            List<KubernetesClusterVmMapVO> nodesToRemove = clusterVMs.stream().filter(vm -> nodeIds.contains(vm.getVmId())).collect(Collectors.toList());
+            if (nodesToRemove.size() != nodeIds.size() || nodesToRemove.stream().anyMatch(vm -> vm.isExternalNode() || vm.isControlNode() || vm.isEtcdNode())) {
+                logAndThrow(Level.WARN, String.format("Scaling failed for Kubernetes cluster : %s, only CKS-created worker nodes of the cluster can be removed by scaling", kubernetesCluster.getName()));
+            }
+            clusterSize = workerNodes - nodeIds.size();
+            if (clusterSize < 1) {
+                logAndThrow(Level.WARN, String.format("Scaling failed for Kubernetes cluster : %s, can not remove all nodes from a cluster", kubernetesCluster.getName()));
+            }
+        } else if (clusterSize != null && clusterSize < externalNodes) {
+            logAndThrow(Level.WARN, String.format("Scaling failed for Kubernetes cluster : %s, size %d is below the %d nodes added with addNodesToKubernetesCluster",
+                    kubernetesCluster.getName(), clusterSize, externalNodes));
+        }
+        if (nodeTypesKnown) {
+            syncNodeCounts(controlNodes, etcdNodes, workerNodes);
+        }
+    }
+
+    private void syncNodeCounts(long controlNodes, long etcdNodes, long workerNodes) {
+        Map<KubernetesClusterNodeType, Long> missingNodes = new EnumMap<>(KubernetesClusterNodeType.class);
+        missingNodes.put(CONTROL, controlNodes - kubernetesCluster.getControlNodeCount());
+        missingNodes.put(ETCD, etcdNodes - kubernetesCluster.getEtcdNodeCount());
+        missingNodes.put(WORKER, workerNodes - kubernetesCluster.getNodeCount());
+        missingNodes.values().removeIf(count -> count == 0);
+        if (missingNodes.isEmpty()) {
+            return;
+        }
+        logger.warn("Kubernetes cluster {} records {} control, {} etcd and {} worker nodes but has {}, {} and {}, correcting it", kubernetesCluster,
+                kubernetesCluster.getControlNodeCount(), kubernetesCluster.getEtcdNodeCount(), kubernetesCluster.getNodeCount(), controlNodes, etcdNodes, workerNodes);
+        KubernetesClusterVO kubernetesClusterVO = kubernetesClusterDao.findById(kubernetesCluster.getId());
+        for (Map.Entry<KubernetesClusterNodeType, Long> missing : missingNodes.entrySet()) {
+            ServiceOffering offering = null;
+            try {
+                offering = getServiceOfferingForNodeTypeOnCluster(missing.getKey(), kubernetesCluster);
+            } catch (CloudRuntimeException e) {
+                logger.debug("No service offering found for {} nodes of Kubernetes cluster {}", missing.getKey(), kubernetesCluster, e);
+            }
+            if (offering == null) {
+                logger.warn("Unable to find the {} service offering of Kubernetes cluster {}, its cores and memory are not corrected", missing.getKey(), kubernetesCluster);
+                continue;
+            }
+            Pair<Long, Long> missingCapacity = calculateNodesCapacity(offering, missing.getValue());
+            kubernetesClusterVO.setCores(kubernetesClusterVO.getCores() + missingCapacity.first());
+            kubernetesClusterVO.setMemory(kubernetesClusterVO.getMemory() + missingCapacity.second());
+        }
+        if (missingNodes.containsKey(CONTROL)) {
+            kubernetesClusterVO.setControlNodeCount(controlNodes);
+        }
+        if (missingNodes.containsKey(ETCD)) {
+            kubernetesClusterVO.setEtcdNodeCount(etcdNodes);
+        }
+        kubernetesClusterVO.setNodeCount(workerNodes);
+        kubernetesClusterDao.update(kubernetesClusterVO.getId(), kubernetesClusterVO);
+        kubernetesCluster = kubernetesClusterVO;
     }
 
     /**
@@ -925,8 +1011,6 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
             logger.info("Scaling Kubernetes cluster {}", kubernetesCluster);
         }
         scaleTimeoutTime = System.currentTimeMillis() + KubernetesClusterService.KubernetesClusterScaleTimeout.value() * 1000;
-        final long originalClusterSize = kubernetesCluster.getNodeCount();
-
         // The request was validated for the state it was accepted in, for example what Alert allows,
         // and another operation may have started since
         KubernetesClusterVO currentCluster = kubernetesClusterDao.findById(kubernetesCluster.getId());
@@ -934,6 +1018,10 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
             logAndThrow(Level.WARN, String.format("Scaling Kubernetes cluster : %s failed, it went from %s to %s state after the request was accepted, please retry",
                     kubernetesCluster.getName(), originalState, currentCluster.getState()));
         }
+
+        // Only once the cluster is known to still be in the state the request was accepted in, as this may correct its stored counts
+        validateAndSyncWorkerNodeCount();
+        final long originalClusterSize = kubernetesCluster.getNodeCount();
 
         // DEFAULT node type means only the global service offering has been set for the Kubernetes cluster
         boolean scaleClusterDefaultOffering = serviceOfferingNodeTypeMap.containsKey(DEFAULT.name());
