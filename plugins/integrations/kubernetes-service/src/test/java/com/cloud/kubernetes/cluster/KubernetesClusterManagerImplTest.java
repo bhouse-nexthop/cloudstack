@@ -387,6 +387,64 @@ public class KubernetesClusterManagerImplTest {
         kubernetesClusterManager.validateKubernetesClusterScaleSize(clusterVO, 2L, 10, Mockito.mock(DataCenter.class));
     }
 
+    private KubernetesClusterVO mockRunningClusterWithAddedNodes(long nodeCount, int addedNodes) {
+        KubernetesClusterVO clusterVO = Mockito.mock(KubernetesClusterVO.class);
+        Mockito.lenient().when(clusterVO.getId()).thenReturn(1L);
+        Mockito.when(clusterVO.getState()).thenReturn(KubernetesCluster.State.Running);
+        Mockito.when(clusterVO.getControlNodeCount()).thenReturn(1L);
+        Mockito.when(clusterVO.getNodeCount()).thenReturn(nodeCount);
+        List<KubernetesClusterVmMapVO> vmMaps = new ArrayList<>();
+        for (int i = 0; i < nodeCount + 1; i++) {
+            KubernetesClusterVmMapVO vmMap = Mockito.mock(KubernetesClusterVmMapVO.class);
+            Mockito.lenient().when(vmMap.isExternalNode()).thenReturn(i > 0 && i <= addedNodes);
+            vmMaps.add(vmMap);
+        }
+        Mockito.lenient().when(kubernetesClusterVmMapDao.listByClusterId(1L)).thenReturn(vmMaps);
+        return clusterVO;
+    }
+
+    @Test
+    public void testValidateKubernetesClusterScaleSizeDownscaleToAddedNodesNoError() {
+        kubernetesClusterManager.validateKubernetesClusterScaleSize(mockRunningClusterWithAddedNodes(6L, 2), 2L, 10, Mockito.mock(DataCenter.class));
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
+    public void testValidateKubernetesClusterScaleSizeDownscaleBelowAddedNodes() {
+        kubernetesClusterManager.validateKubernetesClusterScaleSize(mockRunningClusterWithAddedNodes(6L, 2), 1L, 10, Mockito.mock(DataCenter.class));
+    }
+
+    @Test
+    public void testValidateKubernetesClusterScaleSizeUpscaleWithAddedNodesNoError() {
+        KubernetesClusterVO clusterVO = mockRunningClusterWithAddedNodes(4L, 2);
+        Mockito.when(templateDao.findById(Mockito.anyLong())).thenReturn(Mockito.mock(VMTemplateVO.class));
+        Mockito.when(templateJoinDao.newTemplateView(Mockito.any(VMTemplateVO.class), Mockito.anyLong(), Mockito.anyBoolean())).thenReturn(List.of(Mockito.mock(TemplateJoinVO.class)));
+        kubernetesClusterManager.validateKubernetesClusterScaleSize(clusterVO, 6L, 10, Mockito.mock(DataCenter.class));
+        Mockito.verify(kubernetesClusterVmMapDao, Mockito.never()).listByClusterId(Mockito.anyLong());
+    }
+
+    @Test(expected = InvalidParameterValueException.class)
+    public void testValidateKubernetesClusterScaleNodeIdsAddedNode() {
+        KubernetesClusterVO clusterVO = Mockito.mock(KubernetesClusterVO.class);
+        Mockito.when(clusterVO.getId()).thenReturn(1L);
+        KubernetesClusterVmMapVO addedNode = Mockito.mock(KubernetesClusterVmMapVO.class);
+        Mockito.when(addedNode.isExternalNode()).thenReturn(true);
+        List<Long> nodeIds = List.of(10L);
+        Mockito.when(kubernetesClusterVmMapDao.listByClusterIdAndVmIdsIn(1L, nodeIds)).thenReturn(List.of(addedNode));
+        kubernetesClusterManager.validateKubernetesClusterScaleNodeIds(clusterVO, nodeIds);
+    }
+
+    @Test
+    public void testValidateKubernetesClusterScaleNodeIdsWorkerNoError() {
+        KubernetesClusterVO clusterVO = Mockito.mock(KubernetesClusterVO.class);
+        Mockito.when(clusterVO.getId()).thenReturn(1L);
+        Mockito.when(clusterVO.getControlNodeCount()).thenReturn(1L);
+        Mockito.when(clusterVO.getNodeCount()).thenReturn(3L);
+        KubernetesClusterVmMapVO worker = Mockito.mock(KubernetesClusterVmMapVO.class);
+        List<Long> nodeIds = List.of(10L);
+        Mockito.when(kubernetesClusterVmMapDao.listByClusterIdAndVmIdsIn(1L, nodeIds)).thenReturn(List.of(worker));
+        kubernetesClusterManager.validateKubernetesClusterScaleNodeIds(clusterVO, nodeIds);
+    }
+
     @Test(expected = InvalidParameterValueException.class)
     public void testValidateKubernetesClusterScaleSizeUpscaleDeletedTemplate() {
         KubernetesClusterVO clusterVO = Mockito.mock(KubernetesClusterVO.class);

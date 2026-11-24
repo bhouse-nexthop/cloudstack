@@ -127,7 +127,7 @@
             <template v-if="column.key === 'kubernetesnodeversion'">
               <span> {{ text ? text : '' }} </span>
             </template>
-            <template v-if="column.key === 'actions'">
+            <template v-if="column.key === 'actions' && !record.isexternalnode">
               <a-tooltip placement="bottom" >
                 <template #title>
                   {{ $t('label.action.delete.node') }}

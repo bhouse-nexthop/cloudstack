@@ -774,22 +774,31 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
     }
 
     public List<KubernetesClusterVmMapVO> getWorkerNodesToRemove() {
-        List<KubernetesClusterVmMapVO> workerVMsMap = getKubernetesClusterVMMaps().stream()
-                .filter(vm -> !vm.isExternalNode() && !vm.isControlNode() && !vm.isEtcdNode())
-                .collect(Collectors.toList());
+        List<KubernetesClusterVmMapVO> workerVMsMap = new ArrayList<>();
+        int externalNodes = 0;
+        for (KubernetesClusterVmMapVO vm : getKubernetesClusterVMMaps()) {
+            if (vm.isExternalNode()) {
+                externalNodes++;
+            } else if (!vm.isControlNode() && !vm.isEtcdNode()) {
+                workerVMsMap.add(vm);
+            }
+        }
         // Nodes are removed from the end of the list: put workers whose VMs are down last, so a
         // scale-down removes those first. The sort is stable, so the order is otherwise kept.
         Set<Long> downVmIds = workerVMsMap.stream().map(KubernetesClusterVmMapVO::getVmId)
                 .filter(this::isVmDown).collect(Collectors.toSet());
         workerVMsMap.sort(Comparator.comparing(vm -> downVmIds.contains(vm.getVmId())));
-        int totalWorkerNodes = workerVMsMap.size();
         int desiredWorkerNodes = clusterSize == null ? (int) kubernetesCluster.getNodeCount() : clusterSize.intValue();
-        int toRemoveCount = Math.max(0, totalWorkerNodes - desiredWorkerNodes);
-        if (toRemoveCount == 0) {
-            return new ArrayList<>();
+        // The cluster size also counts nodes added with addNodesToKubernetesCluster, which scaling never removes
+        if (desiredWorkerNodes < externalNodes) {
+            logTransitStateToFailedIfNeededAndThrow(Level.WARN, String.format("Scaling failed for Kubernetes cluster : %s, size %d is below the %d nodes added with addNodesToKubernetesCluster",
+                    kubernetesCluster.getName(), desiredWorkerNodes, externalNodes));
         }
-        int startIndex = Math.max(0, totalWorkerNodes - toRemoveCount);
-        return new ArrayList<>(workerVMsMap.subList(startIndex, totalWorkerNodes));
+        int totalWorkerNodes = workerVMsMap.size();
+        // Never remove more than the requested drop, even if the stored size has drifted below the real node count
+        int requestedDrop = (int) kubernetesCluster.getNodeCount() - desiredWorkerNodes;
+        int toRemoveCount = Math.max(0, Math.min(requestedDrop, totalWorkerNodes + externalNodes - desiredWorkerNodes));
+        return new ArrayList<>(workerVMsMap.subList(totalWorkerNodes - toRemoveCount, totalWorkerNodes));
     }
 
     /**
