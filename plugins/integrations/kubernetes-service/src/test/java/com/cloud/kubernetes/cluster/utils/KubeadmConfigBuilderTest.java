@@ -30,6 +30,7 @@ import org.junit.Assert;
 import org.junit.Test;
 
 import com.cloud.exception.InvalidParameterValueException;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
@@ -45,7 +46,7 @@ public class KubeadmConfigBuilderTest {
 
     @Test
     public void buildStackedWithoutSettings() {
-        List<JsonObject> docs = parse(KubeadmConfigBuilder.build("1.30.2", "10.1.1.10", 6443, Collections.emptyList(),
+        List<JsonObject> docs = parse(KubeadmConfigBuilder.build("1.30.2", "10.1.1.10", "10.1.1.10", 6443, Collections.emptyList(),
                 "abcdef.0123456789abcdef", "3600s", "key", false, Collections.emptyMap(), false, null));
         Assert.assertEquals(2, docs.size());
         JsonObject cluster = docs.get(0);
@@ -54,6 +55,7 @@ public class KubeadmConfigBuilderTest {
         Assert.assertEquals("1.30.2", cluster.get("kubernetesVersion").getAsString());
         Assert.assertFalse(cluster.has("controlPlaneEndpoint"));
         Assert.assertFalse(cluster.has("etcd"));
+        Assert.assertEquals(1, cluster.getAsJsonObject("apiServer").getAsJsonArray("certSANs").size());
         Assert.assertEquals("10.1.1.10", cluster.getAsJsonObject("apiServer").getAsJsonArray("certSANs").get(0).getAsString());
         Assert.assertFalse(cluster.getAsJsonObject("apiServer").has("extraArgs"));
         JsonObject init = docs.get(1);
@@ -64,8 +66,8 @@ public class KubeadmConfigBuilderTest {
     }
 
     @Test
-    public void buildExternalEtcdMatchesPreviousTemplate() {
-        List<JsonObject> docs = parse(KubeadmConfigBuilder.build("1.30.2", "10.1.1.10", 6443, List.of("http://10.1.1.20:2379"),
+    public void buildExternalEtcd() {
+        List<JsonObject> docs = parse(KubeadmConfigBuilder.build("1.30.2", "10.1.1.10", "10.1.1.10", 6443, List.of("http://10.1.1.20:2379"),
                 "abcdef.0123456789abcdef", "0", "key", false, Collections.emptyMap(), false, null));
         JsonObject cluster = docs.get(0);
         Assert.assertEquals("10.1.1.10:6443", cluster.get("controlPlaneEndpoint").getAsString());
@@ -77,9 +79,33 @@ public class KubeadmConfigBuilderTest {
     }
 
     @Test
+    public void buildExternalEtcdBehindPublicIp() {
+        List<JsonObject> docs = parse(KubeadmConfigBuilder.build("1.30.2", "10.1.1.10", "203.0.113.5", 6443, List.of("http://10.1.1.20:2379"),
+                "abcdef.0123456789abcdef", "0", "key", false, Collections.emptyMap(), false, null));
+        JsonObject cluster = docs.get(0);
+        Assert.assertEquals("203.0.113.5:6443", cluster.get("controlPlaneEndpoint").getAsString());
+        JsonArray certSans = cluster.getAsJsonObject("apiServer").getAsJsonArray("certSANs");
+        Assert.assertEquals(2, certSans.size());
+        Assert.assertEquals("10.1.1.10", certSans.get(0).getAsString());
+        Assert.assertEquals("203.0.113.5", certSans.get(1).getAsString());
+        Assert.assertEquals("10.1.1.10", docs.get(1).getAsJsonObject("localAPIEndpoint").get("advertiseAddress").getAsString());
+    }
+
+    @Test
+    public void buildStackedWithSettingsBehindPublicIp() {
+        List<JsonObject> docs = parse(KubeadmConfigBuilder.build("1.30.2", "10.1.1.10", "203.0.113.5", 6443, Collections.emptyList(),
+                "abcdef.0123456789abcdef", "0", "key", true, Map.of("oidc-client-id", "kubernetes"), false, null));
+        JsonArray certSans = docs.get(0).getAsJsonObject("apiServer").getAsJsonArray("certSANs");
+        Assert.assertEquals(2, certSans.size());
+        Assert.assertEquals("10.1.1.10", certSans.get(0).getAsString());
+        Assert.assertEquals("203.0.113.5", certSans.get(1).getAsString());
+        Assert.assertFalse(docs.get(1).has("localAPIEndpoint"));
+    }
+
+    @Test
     public void buildWithSettings() {
         String kubelet = KubeadmConfigBuilder.normalizeKubeletConfig("{\"systemReserved\": {\"cpu\": \"500m\"}, \"evictionHard\": {\"memory.available\": \"10%\"}}");
-        List<JsonObject> docs = parse(KubeadmConfigBuilder.build("1.30.2", "10.1.1.10", 6443, Collections.emptyList(),
+        List<JsonObject> docs = parse(KubeadmConfigBuilder.build("1.30.2", "10.1.1.10", "10.1.1.10", 6443, Collections.emptyList(),
                 "abcdef.0123456789abcdef", "0", "key", true,
                 Map.of("oidc-issuer-url", "https://idp.example.com/realms/k8s", "audit-log-maxage", "7"), true, kubelet));
         Assert.assertEquals(3, docs.size());
@@ -99,7 +125,7 @@ public class KubeadmConfigBuilderTest {
 
     @Test
     public void buildV1beta4ArgsAsList() {
-        List<JsonObject> docs = parse(KubeadmConfigBuilder.build("1.31.0", "10.1.1.10", 6443, Collections.emptyList(),
+        List<JsonObject> docs = parse(KubeadmConfigBuilder.build("1.31.0", "10.1.1.10", "10.1.1.10", 6443, Collections.emptyList(),
                 "abcdef.0123456789abcdef", "0", "key", false, Map.of("oidc-client-id", "kubernetes"), false, null));
         Assert.assertEquals("kubeadm.k8s.io/v1beta4", docs.get(0).get("apiVersion").getAsString());
         Assert.assertEquals("kubeadm.k8s.io/v1beta4", docs.get(1).get("apiVersion").getAsString());
@@ -141,7 +167,7 @@ public class KubeadmConfigBuilderTest {
 
     @Test
     public void buildKeepsNodeRestriction() {
-        List<JsonObject> docs = parse(KubeadmConfigBuilder.build("1.30.2", "10.1.1.10", 6443, Collections.emptyList(),
+        List<JsonObject> docs = parse(KubeadmConfigBuilder.build("1.30.2", "10.1.1.10", "10.1.1.10", 6443, Collections.emptyList(),
                 "abcdef.0123456789abcdef", "0", "key", false, Map.of("enable-admission-plugins", "PodNodeSelector"), false, null));
         Assert.assertEquals("PodNodeSelector,NodeRestriction",
                 docs.get(0).getAsJsonObject("apiServer").getAsJsonObject("extraArgs").get("enable-admission-plugins").getAsString());

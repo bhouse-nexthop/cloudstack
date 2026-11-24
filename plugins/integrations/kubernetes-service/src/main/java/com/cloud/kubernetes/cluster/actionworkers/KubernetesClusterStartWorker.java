@@ -241,14 +241,14 @@ public class KubernetesClusterStartWorker extends KubernetesClusterResourceModif
                     CLUSTER_API_PORT,
                     certificateKey);
         }
-        initArgs += String.format("--apiserver-cert-extra-sans=%s", serverIp);
+        initArgs += String.format("--apiserver-cert-extra-sans=%s", String.join(",", addresses));
         initArgs += String.format(" --kubernetes-version=%s", getKubernetesClusterVersion().getSemanticVersion());
         k8sControlNodeConfig = k8sControlNodeConfig.replace(clusterInitArgsKey, initArgs);
         k8sControlNodeConfig = k8sControlNodeConfig.replace(k8sVersionKey, getKubernetesClusterVersion().getSemanticVersion());
         k8sControlNodeConfig = k8sControlNodeConfig.replace(ejectIsoKey, String.valueOf(ejectIso));
         String kubeadmConfig = "";
         if (initWithConfig) {
-            kubeadmConfig = KubeadmConfigBuilder.build(getKubernetesClusterVersion().getSemanticVersion(), serverIp, CLUSTER_API_PORT,
+            kubeadmConfig = KubeadmConfigBuilder.build(getKubernetesClusterVersion().getSemanticVersion(), controlNodeIp, serverIp, CLUSTER_API_PORT,
                     getEtcdEndpointList(etcdIps), joinToken, joinTokenTtl, certificateKey, haSupported,
                     apiServerArgs, auditPolicy != null, kubeletConfig);
         }

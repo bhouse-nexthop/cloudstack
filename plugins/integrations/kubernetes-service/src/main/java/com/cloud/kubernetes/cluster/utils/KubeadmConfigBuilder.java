@@ -167,10 +167,12 @@ public final class KubeadmConfigBuilder {
     }
 
     /**
+     * @param controlNodeIp the control node's own IP on the cluster network
+     * @param serverIp the cluster's API endpoint, e.g. its public IP
      * @param etcdEndpoints external etcd client URLs, empty for stacked etcd
      * @param kubeletConfig normalized kubelet configuration JSON, or null
      */
-    public static String build(String kubernetesVersion, String serverIp, int apiServerPort, List<String> etcdEndpoints,
+    public static String build(String kubernetesVersion, String controlNodeIp, String serverIp, int apiServerPort, List<String> etcdEndpoints,
             String token, String tokenTtl, String certificateKey, boolean haSupported,
             Map<String, String> apiServerArgs, boolean auditPolicy, String kubeletConfig) {
         boolean externalEtcd = !etcdEndpoints.isEmpty();
@@ -183,7 +185,7 @@ public final class KubeadmConfigBuilder {
         String kubeadmApiVersion = v1beta4 ? "kubeadm.k8s.io/v1beta4" : "kubeadm.k8s.io/v1beta3";
 
         Map<String, Object> apiServer = new LinkedHashMap<>();
-        apiServer.put("certSANs", List.of(serverIp));
+        apiServer.put("certSANs", controlNodeIp.equals(serverIp) ? List.of(serverIp) : List.of(controlNodeIp, serverIp));
         Map<String, String> extraArgs = new LinkedHashMap<>();
         if (auditPolicy) {
             extraArgs.put("audit-policy-file", AUDIT_POLICY_PATH);
@@ -222,7 +224,7 @@ public final class KubeadmConfigBuilder {
         initConfiguration.put("nodeRegistration", Map.of("criSocket", CRI_SOCKET));
         if (externalEtcd) {
             Map<String, Object> localApiEndpoint = new LinkedHashMap<>();
-            localApiEndpoint.put("advertiseAddress", serverIp);
+            localApiEndpoint.put("advertiseAddress", controlNodeIp);
             localApiEndpoint.put("bindPort", apiServerPort);
             initConfiguration.put("localAPIEndpoint", localApiEndpoint);
         }
