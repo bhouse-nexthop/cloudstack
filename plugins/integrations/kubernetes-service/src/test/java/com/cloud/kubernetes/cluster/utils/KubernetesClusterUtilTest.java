@@ -183,6 +183,15 @@ public class KubernetesClusterUtilTest {
     }
 
     @Test
+    public void testParseCertificateCheckIp() {
+        Assert.assertEquals(Boolean.TRUE, KubernetesClusterUtil.parseCertificateCheckIp("IP 10.1.1.10 does match certificate\n", "10.1.1.10"));
+        Assert.assertEquals(Boolean.FALSE, KubernetesClusterUtil.parseCertificateCheckIp("IP 10.1.1.10 does NOT match certificate\n", "10.1.1.10"));
+        Assert.assertNull(KubernetesClusterUtil.parseCertificateCheckIp("IP 10.1.1.100 does match certificate\n", "10.1.1.10"));
+        Assert.assertNull(KubernetesClusterUtil.parseCertificateCheckIp("Could not read certificate from <stdin>\nUnable to load certificate\n", "10.1.1.10"));
+        Assert.assertNull(KubernetesClusterUtil.parseCertificateCheckIp(null, "10.1.1.10"));
+    }
+
+    @Test
     public void testParseJoinCommandInvalid() {
         Assert.assertNull(KubernetesClusterUtil.parseJoinCommand(null));
         Assert.assertNull(KubernetesClusterUtil.parseJoinCommand("failed to load admin kubeconfig"));

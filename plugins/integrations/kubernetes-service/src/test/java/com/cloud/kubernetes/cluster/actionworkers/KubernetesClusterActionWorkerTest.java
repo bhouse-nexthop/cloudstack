@@ -117,6 +117,50 @@ public class KubernetesClusterActionWorkerTest {
         actionWorker.portForwardingRulesDao = portForwardingRulesDao;
     }
 
+    private KubernetesClusterActionWorker joinIpWorker(String printedIp) {
+        KubernetesClusterActionWorker worker = Mockito.spy(actionWorker);
+        Mockito.doReturn(new Pair<>("203.0.113.5", 2222)).when(worker).getKubernetesClusterServerIpSshPort(Mockito.nullable(UserVm.class));
+        Mockito.doReturn("cloud").when(worker).getControlNodeLoginUser();
+        Mockito.doReturn(new File("id_rsa")).when(worker).getManagementServerSshPublicKeyFile();
+        Mockito.doReturn("10.1.1.10").when(worker).getControlVmPrivateIp();
+        worker.joinEndpointIp = printedIp;
+        return worker;
+    }
+
+    private String getNodeJoinIp(KubernetesClusterActionWorker worker, Pair<Boolean, String> checkResult) {
+        try (MockedStatic<SshHelper> sshHelper = Mockito.mockStatic(SshHelper.class)) {
+            sshHelper.when(() -> SshHelper.sshExecute(Mockito.anyString(), Mockito.anyInt(), Mockito.anyString(), Mockito.any(),
+                    Mockito.any(), Mockito.contains("-checkip 10.1.1.10"), Mockito.anyInt(), Mockito.anyInt(), Mockito.anyInt()))
+                    .thenReturn(checkResult);
+            String joinIp = worker.getNodeJoinIp();
+            sshHelper.verify(() -> SshHelper.sshExecute(Mockito.eq("203.0.113.5"), Mockito.eq(2222), Mockito.eq("cloud"), Mockito.any(),
+                    Mockito.any(), Mockito.contains("-checkip 10.1.1.10"), Mockito.anyInt(), Mockito.anyInt(), Mockito.anyInt()));
+            return joinIp;
+        }
+    }
+
+    @Test
+    public void testNodeJoinIpIsTheControlNodeIpWhenTheCertificateCoversIt() {
+        Assert.assertEquals("10.1.1.10", getNodeJoinIp(joinIpWorker("203.0.113.5"), new Pair<>(true, "IP 10.1.1.10 does match certificate\n")));
+    }
+
+    @Test
+    public void testNodeJoinIpIsThePrintedEndpointWhenTheCertificateDoesNotCoverTheControlNodeIp() {
+        Assert.assertEquals("203.0.113.5", getNodeJoinIp(joinIpWorker("203.0.113.5"), new Pair<>(true, "IP 10.1.1.10 does NOT match certificate\n")));
+    }
+
+    @Test
+    public void testNodeJoinIpIsTheControlNodeIpWhenTheCertificateCanNotBeChecked() {
+        Assert.assertEquals("10.1.1.10", getNodeJoinIp(joinIpWorker("203.0.113.5"), new Pair<>(true, "Could not read certificate from <stdin>\nUnable to load certificate\n")));
+    }
+
+    @Test
+    public void testNodeJoinIpIsTheControlNodeIpWithoutAPrintedEndpoint() {
+        KubernetesClusterActionWorker worker = joinIpWorker(null);
+        Assert.assertEquals("10.1.1.10", worker.getNodeJoinIp());
+        Mockito.verify(worker, Mockito.never()).isApiServerCertificateValidFor(Mockito.anyString());
+    }
+
     @Test
     public void testDeleteJoinTokenOnlyOnce() {
         KubernetesClusterActionWorker worker = Mockito.spy(actionWorker);
