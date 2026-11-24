@@ -66,6 +66,7 @@ import com.cloud.vm.VMInstanceVO;
 import com.cloud.vm.VirtualMachine;
 import com.cloud.vm.dao.NicDao;
 import com.cloud.vm.dao.VMInstanceDao;
+import org.apache.cloudstack.acl.SecurityChecker;
 import org.apache.cloudstack.api.response.KubernetesClusterResponse;
 import com.cloud.host.HostVO;
 import com.cloud.host.dao.HostDao;
@@ -201,6 +202,113 @@ public class KubernetesClusterManagerImplTest {
         Mockito.when(network.getState()).thenReturn(Network.State.Implemented);
         Mockito.when(network.getNetworkACLId()).thenReturn(NetworkACL.DEFAULT_ALLOW);
         kubernetesClusterManager.validateVpcTier(network);
+    }
+
+    private VMInstanceVO mockNodeForAdd(long vmId, String uuid, boolean forCks, Long nicNetworkId, boolean inCluster) {
+        VMInstanceVO vm = Mockito.mock(VMInstanceVO.class);
+        Mockito.lenient().when(vm.getUuid()).thenReturn(uuid);
+        Mockito.when(vm.getTemplateId()).thenReturn(10L + vmId);
+        Mockito.when(vmInstanceDao.findById(vmId)).thenReturn(vm);
+        VMTemplateVO template = Mockito.mock(VMTemplateVO.class);
+        Mockito.lenient().when(template.isForCks()).thenReturn(forCks);
+        Mockito.lenient().when(template.getUuid()).thenReturn("template-" + uuid);
+        Mockito.when(templateDao.findById(10L + vmId)).thenReturn(template);
+        NicVO nic = null;
+        if (nicNetworkId != null) {
+            nic = Mockito.mock(NicVO.class);
+            Mockito.when(nic.getNetworkId()).thenReturn(nicNetworkId);
+        }
+        Mockito.when(nicDao.findDefaultNicForVM(vmId)).thenReturn(nic);
+        List<KubernetesClusterVmMapVO> maps = Collections.emptyList();
+        if (inCluster) {
+            KubernetesClusterVmMapVO map = Mockito.mock(KubernetesClusterVmMapVO.class);
+            Mockito.when(map.getClusterId()).thenReturn(1L);
+            maps = List.of(map);
+        }
+        Mockito.when(kubernetesClusterVmMapDao.listByVmId(vmId)).thenReturn(maps);
+        return vm;
+    }
+
+    private void assertNodesNotAddable(List<Long> nodeIds, String... expectedReasons) {
+        InvalidParameterValueException e = Assert.assertThrows(InvalidParameterValueException.class,
+                () -> kubernetesClusterManager.validateNodes(nodeIds, 5L, "net", false));
+        for (String reason : expectedReasons) {
+            Assert.assertTrue(e.getMessage(), e.getMessage().contains(reason));
+        }
+    }
+
+    @Test
+    public void validateNodesAcceptsValidNodes() {
+        mockNodeForAdd(1L, "vm-1", true, 5L, false);
+        mockNodeForAdd(2L, "vm-2", true, 5L, false);
+        Assert.assertEquals(List.of(1L, 2L), kubernetesClusterManager.validateNodes(List.of(1L, 2L), 5L, "net", false));
+    }
+
+    @Test
+    public void validateNodesRejectsRemovedVm() {
+        VMInstanceVO removed = Mockito.mock(VMInstanceVO.class);
+        Mockito.when(removed.getUuid()).thenReturn("vm-1");
+        Mockito.when(vmInstanceDao.findByIdIncludingRemoved(1L)).thenReturn(removed);
+        assertNodesNotAddable(List.of(1L), "VM vm-1 has been removed");
+        Mockito.verify(accountManager).checkAccess(Mockito.any(Account.class), Mockito.eq(SecurityChecker.AccessType.OperateEntry), Mockito.eq(false), Mockito.eq(removed));
+    }
+
+    @Test
+    public void validateNodesRejectsUnknownVm() {
+        assertNodesNotAddable(List.of(1L), "VM 1 was not found");
+    }
+
+    @Test
+    public void validateNodesRejectsTemplateNotForCks() {
+        mockNodeForAdd(1L, "vm-1", false, 5L, false);
+        assertNodesNotAddable(List.of(1L), "VM vm-1 is deployed with template template-vm-1, which is not marked for CKS");
+    }
+
+    @Test
+    public void validateNodesRejectsNodeWithMissingTemplate() {
+        mockNodeForAdd(1L, "vm-1", true, 5L, false);
+        Mockito.when(templateDao.findById(11L)).thenReturn(null);
+        assertNodesNotAddable(List.of(1L), "The template of VM vm-1 was not found or has been deleted");
+    }
+
+    @Test
+    public void validateNodesRejectsNodeOutsideClusterNetwork() {
+        mockNodeForAdd(1L, "vm-1", true, 6L, false);
+        assertNodesNotAddable(List.of(1L), "VM vm-1 does not have its default NIC in the Kubernetes cluster network net");
+    }
+
+    @Test
+    public void validateNodesRejectsNodeWithoutDefaultNic() {
+        mockNodeForAdd(1L, "vm-1", true, null, false);
+        assertNodesNotAddable(List.of(1L), "VM vm-1 does not have its default NIC in the Kubernetes cluster network net");
+    }
+
+    @Test
+    public void validateNodesRejectsNodeAlreadyInCluster() {
+        mockNodeForAdd(1L, "vm-1", true, 5L, true);
+        KubernetesClusterVO cluster = Mockito.mock(KubernetesClusterVO.class);
+        Mockito.when(cluster.getUuid()).thenReturn("cks");
+        Mockito.when(kubernetesClusterDao.findById(1L)).thenReturn(cluster);
+        assertNodesNotAddable(List.of(1L), "VM vm-1 is already part of the Kubernetes cluster cks");
+    }
+
+    @Test
+    public void validateNodesRejectsWholeRequestAndNamesEachInvalidNode() {
+        mockNodeForAdd(1L, "vm-1", true, 5L, false);
+        mockNodeForAdd(2L, "vm-2", false, 5L, false);
+        mockNodeForAdd(3L, "vm-3", true, 6L, false);
+        InvalidParameterValueException e = Assert.assertThrows(InvalidParameterValueException.class,
+                () -> kubernetesClusterManager.validateNodes(List.of(1L, 2L, 3L), 5L, "net", false));
+        Assert.assertFalse(e.getMessage().contains("VM vm-1"));
+        Assert.assertTrue(e.getMessage().contains("VM vm-2 is deployed with template"));
+        Assert.assertTrue(e.getMessage().contains("VM vm-3 does not have its default NIC"));
+    }
+
+    @Test
+    public void validateNodesForRemovalDropsMissingVm() {
+        VMInstanceVO vm = Mockito.mock(VMInstanceVO.class);
+        Mockito.when(vmInstanceDao.findById(2L)).thenReturn(vm);
+        Assert.assertEquals(List.of(2L), kubernetesClusterManager.validateNodes(List.of(1L, 2L), null, null, true));
     }
 
     @Test
@@ -396,7 +504,7 @@ public class KubernetesClusterManagerImplTest {
         Mockito.when(map.getClusterId()).thenReturn(7L);
         Mockito.when(kubernetesClusterVmMapDao.listByVmId(1L)).thenReturn(List.of(map));
         Mockito.when(kubernetesClusterDao.findById(7L)).thenReturn(Mockito.mock(KubernetesClusterVO.class));
-        Assert.assertTrue(kubernetesClusterManager.validateNodes(List.of(1L), 5L, "net", false).isEmpty());
+        Assert.assertThrows(InvalidParameterValueException.class, () -> kubernetesClusterManager.validateNodes(List.of(1L), 5L, "net", false));
     }
 
     @Test
@@ -419,7 +527,7 @@ public class KubernetesClusterManagerImplTest {
         Mockito.when(kubernetesClusterVmMapDao.listByVmId(1L)).thenReturn(List.of(stale, live));
         Mockito.when(kubernetesClusterDao.findById(7L)).thenReturn(null);
         Mockito.when(kubernetesClusterDao.findById(8L)).thenReturn(Mockito.mock(KubernetesClusterVO.class));
-        Assert.assertTrue(kubernetesClusterManager.validateNodes(List.of(1L), 5L, "net", false).isEmpty());
+        Assert.assertThrows(InvalidParameterValueException.class, () -> kubernetesClusterManager.validateNodes(List.of(1L), 5L, "net", false));
     }
 
     @Test
