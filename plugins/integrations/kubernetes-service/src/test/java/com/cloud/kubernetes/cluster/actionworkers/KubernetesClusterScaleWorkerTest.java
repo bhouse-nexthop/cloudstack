@@ -995,6 +995,56 @@ public class KubernetesClusterScaleWorkerTest {
         actionEventUtilsMock.verifyNoInteractions();
     }
 
+    @Test
+    public void testRemoveNodesFromClusterDestroyErrorAndLookupFailureFails() throws Exception {
+        KubernetesClusterScaleWorker spy = setUpNodeRemoval();
+        KubernetesClusterVmMapVO map1 = mockNodeVmMap(101L, 201L, "node-1");
+        UserVmVO vm1 = userVmDao.findById(201L);
+        Mockito.when(userVmService.destroyVm(201L, true)).thenThrow(new CloudRuntimeException("Failed to destroy vm with specified vmId"));
+        Mockito.when(vmInstanceDao.findByIdIncludingRemoved(201L)).thenThrow(new CloudRuntimeException("database unavailable"));
+
+        CloudRuntimeException e = Assert.assertThrows(CloudRuntimeException.class, () -> spy.removeNodesFromCluster(List.of(map1)));
+
+        Assert.assertTrue(e.getMessage(), e.getMessage().contains("unable to destroy VM"));
+        Assert.assertFalse(e.getMessage(), e.getMessage().contains("left in state"));
+        Mockito.verify(kubernetesClusterVmMapDao).expunge(101L);
+        Mockito.verify(userVmManager, Mockito.never()).expunge(vm1);
+        Mockito.verify(spy).revokeRemovedNodeVmSshRules(vm1);
+        Mockito.verify(spy).stateTransitTo(CLUSTER_ID, KubernetesCluster.Event.OperationFailed);
+    }
+
+    @Test
+    public void testRemoveNodesFromClusterExpungeFailureAndLookupFailureGoesOn() throws Exception {
+        KubernetesClusterScaleWorker spy = setUpNodeRemoval();
+        KubernetesClusterVmMapVO map1 = mockNodeVmMap(101L, 201L, "node-1");
+        UserVmVO vm1 = userVmDao.findById(201L);
+        Mockito.when(userVmManager.expunge(vm1)).thenReturn(false);
+        Mockito.when(vmInstanceDao.findByIdIncludingRemoved(201L)).thenThrow(new CloudRuntimeException("database unavailable"));
+
+        spy.removeNodesFromCluster(List.of(map1));
+
+        Mockito.verify(kubernetesClusterVmMapDao).expunge(101L);
+        Mockito.verify(spy).revokeRemovedNodeVmSshRules(vm1);
+        Mockito.verify(spy, Mockito.never()).stateTransitTo(Mockito.anyLong(), Mockito.any());
+        actionEventUtilsMock.verifyNoInteractions();
+    }
+
+    @Test
+    public void testRemoveNodesFromClusterUnexpectedDestroyErrorRevokesSshRule() throws Exception {
+        KubernetesClusterScaleWorker spy = setUpNodeRemoval();
+        KubernetesClusterVmMapVO map1 = mockNodeVmMap(101L, 201L, "node-1");
+        UserVmVO vm1 = userVmDao.findById(201L);
+        Mockito.when(userVmService.destroyVm(201L, true)).thenThrow(new IllegalStateException("unexpected"));
+
+        Assert.assertThrows(IllegalStateException.class, () -> spy.removeNodesFromCluster(List.of(map1)));
+
+        Mockito.verify(kubernetesClusterVmMapDao).expunge(101L);
+        Mockito.verify(userVmManager, Mockito.never()).expunge(vm1);
+        Mockito.verify(spy).revokeRemovedNodeVmSshRules(vm1);
+        // Left to the caller, as before
+        Mockito.verify(spy, Mockito.never()).stateTransitTo(Mockito.anyLong(), Mockito.any());
+    }
+
     private com.cloud.network.rules.PortForwardingRuleVO mockPfRule(long id, long ipId, long networkId, int sourcePort, int destinationPort) {
         com.cloud.network.rules.PortForwardingRuleVO rule = Mockito.mock(com.cloud.network.rules.PortForwardingRuleVO.class);
         Mockito.lenient().when(rule.getSourceIpAddressId()).thenReturn(ipId);
