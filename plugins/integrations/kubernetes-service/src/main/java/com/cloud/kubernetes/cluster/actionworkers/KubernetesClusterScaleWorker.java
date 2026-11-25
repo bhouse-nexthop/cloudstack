@@ -594,48 +594,10 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
         CallContext vmContext = CallContext.register(CallContext.current(),
                 ApiCommandResourceType.VirtualMachine);
         vmContext.setEventResourceId(userVM.getId());
-        // Whether the VM is left behind, destroyed or not
-        boolean leftBehind = false;
+        // Also left behind if it can't be destroyed, or anything unexpected goes wrong
+        boolean leftBehind = true;
         try {
-            try {
-                userVmService.destroyVm(userVM.getId(), true);
-            } catch (ResourceUnavailableException | CloudRuntimeException e) {
-                // destroyVm can fail after the VM has been destroyed, on the resource count updates that follow
-                VMInstanceVO vm = null;
-                boolean found = false;
-                try {
-                    vm = vmInstanceDao.findByIdIncludingRemoved(userVM.getId());
-                    found = true;
-                } catch (RuntimeException lookupError) {
-                    logger.warn("Unable to look up VM {} after it failed to be destroyed", userVM, lookupError);
-                }
-                if (found && (vm == null || vm.getRemoved() != null)) {
-                    logger.warn("Destroying VM {} of the node removed from Kubernetes cluster {} reported an error, but the VM is expunged",
-                            userVM, kubernetesCluster, e);
-                    return;
-                }
-                if (found && List.of(VirtualMachine.State.Destroyed, VirtualMachine.State.Expunging).contains(vm.getState())) {
-                    logger.warn("Destroying VM {} of the node removed from Kubernetes cluster {} reported an error, but the VM is {}",
-                            userVM, kubernetesCluster, vm.getState(), e);
-                } else {
-                    leftBehind = true;
-                    logTransitStateAndThrow(Level.ERROR, String.format("Scaling Kubernetes cluster %s failed, unable to destroy VM %s%s." +
-                        " Its node was removed from the Kubernetes cluster and the VM is no longer part of the cluster;" +
-                        " it may still be running and has to be destroyed manually", kubernetesCluster, userVM,
-                        vm == null ? "" : String.format(" (left in state %s)", vm.getState())),
-                        kubernetesCluster.getId(), KubernetesCluster.Event.OperationFailed, e);
-                }
-            }
-            boolean expunged = false;
-            Exception expungeError = null;
-            try {
-                expunged = userVmManager.expunge(userVM);
-            } catch (RuntimeException e) {
-                expungeError = e;
-            }
-            if (!expunged) {
-                leftBehind = warnVmNotExpunged(userVM, expungeError);
-            }
+            leftBehind = destroyAndExpungeRemovedNodeVm(userVM);
         } finally {
             CallContext.unregister();
             if (leftBehind) {
@@ -644,25 +606,87 @@ public class KubernetesClusterScaleWorker extends KubernetesClusterResourceModif
         }
     }
 
-    /** @return false if the VM turns out to be expunged, true if it is left behind. Doesn't throw. */
-    private boolean warnVmNotExpunged(final UserVmVO userVM, final Exception expungeError) {
+    /**
+     * @return true if the VM is left behind, false if it is expunged
+     * @throws CloudRuntimeException if the VM can't be destroyed, once the cluster is moved on OperationFailed
+     */
+    private boolean destroyAndExpungeRemovedNodeVm(final UserVmVO userVM) throws CloudRuntimeException {
+        try {
+            userVmService.destroyVm(userVM.getId(), true);
+        } catch (ResourceUnavailableException | CloudRuntimeException e) {
+            // destroyVm can fail after the VM has been destroyed, on the resource count updates that follow
+            RemovedNodeVm vm = lookUpRemovedNodeVm(userVM, "destroyed");
+            if (vm.expunged) {
+                logger.warn("Destroying VM {} of the node removed from Kubernetes cluster {} reported an error, but the VM is expunged",
+                        userVM, kubernetesCluster, e);
+                return false;
+            }
+            if (vm.state != VirtualMachine.State.Destroyed && vm.state != VirtualMachine.State.Expunging) {
+                logTransitStateAndThrow(Level.ERROR, String.format("Scaling Kubernetes cluster %s failed, unable to destroy VM %s%s." +
+                        " Its node was removed from the Kubernetes cluster and the VM is no longer part of the cluster;" +
+                        " it may still be running and has to be destroyed manually", kubernetesCluster, userVM,
+                        vm.state == null ? "" : String.format(" (left in state %s)", vm.state)),
+                        kubernetesCluster.getId(), KubernetesCluster.Event.OperationFailed, e);
+            }
+            logger.warn("Destroying VM {} of the node removed from Kubernetes cluster {} reported an error, but the VM is {}",
+                    userVM, kubernetesCluster, vm.state, e);
+        }
+        Exception expungeError = null;
+        try {
+            if (userVmManager.expunge(userVM)) {
+                return false;
+            }
+        } catch (RuntimeException e) {
+            expungeError = e;
+        }
+        return warnVmNotExpunged(userVM, expungeError);
+    }
+
+    /** A removed node's VM, as looked up after destroying or expunging it reported an error */
+    private static final class RemovedNodeVm {
+        final boolean expunged;
+        /** null if the VM is expunged or can't be looked up */
+        final VirtualMachine.State state;
+
+        RemovedNodeVm(final boolean expunged, final VirtualMachine.State state) {
+            this.expunged = expunged;
+            this.state = state;
+        }
+    }
+
+    /** Doesn't throw: a VM that can't be looked up is taken as not expunged, in an unknown state */
+    private RemovedNodeVm lookUpRemovedNodeVm(final UserVmVO userVM, final String failedAction) {
         VMInstanceVO vm;
         try {
             vm = vmInstanceDao.findByIdIncludingRemoved(userVM.getId());
         } catch (RuntimeException e) {
-            logger.warn("Unable to expunge VM {} of the node removed from Kubernetes cluster {}; it is no longer part of the cluster",
-                    userVM, kubernetesCluster, expungeError);
-            return true;
+            logger.warn("Unable to look up VM {} of the node removed from Kubernetes cluster {}, after it failed to be {}",
+                    userVM, kubernetesCluster, failedAction, e);
+            return new RemovedNodeVm(false, null);
         }
         if (vm == null || vm.getRemoved() != null) {
+            return new RemovedNodeVm(true, null);
+        }
+        return new RemovedNodeVm(false, vm.getState());
+    }
+
+    /** @return false if the VM turns out to be expunged, true if it is left behind. Doesn't throw. */
+    private boolean warnVmNotExpunged(final UserVmVO userVM, final Exception expungeError) {
+        RemovedNodeVm vm = lookUpRemovedNodeVm(userVM, "expunged");
+        if (vm.expunged) {
             // Expunged meanwhile, by the expunge task for one
             logger.info("VM {} of the node removed from Kubernetes cluster {} has been expunged", userVM, kubernetesCluster);
             return false;
         }
+        if (vm.state == null) {
+            logger.warn("Unable to expunge VM {} of the node removed from Kubernetes cluster {}; it is no longer part of the cluster",
+                    userVM, kubernetesCluster, expungeError);
+            return true;
+        }
         String message = String.format("Unable to expunge VM %s of the node removed from Kubernetes cluster %s. The VM is" +
                 " no longer part of the cluster and is left in state %s, for the expunge task to retry. Until it is expunged" +
                 " it keeps the cluster's network in use, and the cluster can't be deleted with its network",
-                userVM, kubernetesCluster, vm.getState());
+                userVM, kubernetesCluster, vm.state);
         logger.warn(message, expungeError);
         try {
             // Recorded for the VM's owner, who has to see why the VM still holds the network
