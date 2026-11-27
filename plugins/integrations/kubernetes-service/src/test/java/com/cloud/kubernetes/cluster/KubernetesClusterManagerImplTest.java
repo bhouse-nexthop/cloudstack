@@ -2010,6 +2010,7 @@ public class KubernetesClusterManagerImplTest {
     private RemoveNodesFromKubernetesClusterCmd mockRemoveNodesCmd(KubernetesCluster.ClusterType clusterType, List<Long> nodeIds) {
         KubernetesClusterVO cluster = Mockito.mock(KubernetesClusterVO.class);
         Mockito.when(cluster.getClusterType()).thenReturn(clusterType);
+        Mockito.lenient().when(cluster.getState()).thenReturn(KubernetesCluster.State.Running);
         Mockito.when(kubernetesClusterDao.findById(1L)).thenReturn(cluster);
         for (Long id : nodeIds) {
             VMInstanceVO vm = Mockito.mock(VMInstanceVO.class);

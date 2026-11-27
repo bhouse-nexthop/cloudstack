@@ -112,9 +112,6 @@ public class KubernetesClusterActionWorkerTest {
 
     @Mock
     ConfigurationDao configurationDao;
-
-    @Mock
-    UserVmDao userVmDao;
     KubernetesClusterActionWorker actionWorker = null;
 
     final static Long DEFAULT_ID = 1L;
@@ -1075,6 +1072,8 @@ public class KubernetesClusterActionWorkerTest {
                 mockClusterVm(1L, false, false, true, "10.0.0.1"));
         Mockito.when(kubernetesClusterVmMapDao.listByClusterId(DEFAULT_ID)).thenReturn(vmMaps);
         Assert.assertNull(actionWorker.getControlVmPrivateIp());
+    }
+
     @Test
     public void testGetControlNodeVMsUsesControlMapsSortedByVmId() {
         UserVmVO vm10 = Mockito.mock(UserVmVO.class);
