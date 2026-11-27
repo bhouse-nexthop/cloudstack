@@ -192,6 +192,12 @@ public class KubernetesClusterActionWorkerTest {
         Assert.assertNull(worker.joinToken);
     }
 
+    private KubernetesClusterVmMapVO vmMap(long vmId) {
+        KubernetesClusterVmMapVO vmMap = Mockito.mock(KubernetesClusterVmMapVO.class);
+        Mockito.when(vmMap.getVmId()).thenReturn(vmId);
+        return vmMap;
+    }
+
     @Test
     public void testGetVpcTierKubernetesPublicIpNullDetail() {
         IpAddress result = actionWorker.getVpcTierKubernetesPublicIp(Mockito.mock(Network.class));
@@ -866,5 +872,68 @@ public class KubernetesClusterActionWorkerTest {
                 mockClusterVm(1L, false, false, true, "10.0.0.1"));
         Mockito.when(kubernetesClusterVmMapDao.listByClusterId(DEFAULT_ID)).thenReturn(vmMaps);
         Assert.assertNull(actionWorker.getControlVmPrivateIp());
+    }
+
+    @Test
+    public void testGetControlNodeVMsUsesControlMapsSortedByVmId() {
+        UserVmVO vm10 = Mockito.mock(UserVmVO.class);
+        UserVmVO vm20 = Mockito.mock(UserVmVO.class);
+        KubernetesClusterVmMapVO map10 = vmMap(10L);
+        KubernetesClusterVmMapVO map20 = vmMap(20L);
+        Mockito.when(kubernetesClusterVmMapDao.listByClusterIdAndVmType(DEFAULT_ID, KubernetesClusterNodeType.CONTROL))
+            .thenReturn(Arrays.asList(map20, map10));
+        Mockito.when(userVmDao.findById(10L)).thenReturn(vm10);
+        Mockito.when(userVmDao.findById(20L)).thenReturn(vm20);
+
+        List<UserVm> controlVms = actionWorker.getControlNodeVMs();
+
+        Assert.assertEquals(Arrays.asList(vm10, vm20), controlVms);
+        Mockito.verify(kubernetesClusterVmMapDao, Mockito.never()).listByClusterId(DEFAULT_ID);
+    }
+
+    @Test
+    public void testGetControlNodeVMsFallsBackForClustersWithoutControlFlag() {
+        UserVmVO vm3 = Mockito.mock(UserVmVO.class);
+        UserVmVO vm4 = Mockito.mock(UserVmVO.class);
+        Mockito.when(kubernetesCluster.getEtcdNodeCount()).thenReturn(2L);
+        Mockito.when(kubernetesCluster.getControlNodeCount()).thenReturn(2L);
+        KubernetesClusterVmMapVO etcd1 = vmMap(1L);
+        KubernetesClusterVmMapVO etcd2 = vmMap(2L);
+        KubernetesClusterVmMapVO control1 = vmMap(3L);
+        KubernetesClusterVmMapVO control2 = vmMap(4L);
+        KubernetesClusterVmMapVO worker = vmMap(5L);
+        Mockito.when(kubernetesClusterVmMapDao.listByClusterIdAndVmType(DEFAULT_ID, KubernetesClusterNodeType.CONTROL))
+            .thenReturn(Collections.emptyList());
+        Mockito.when(kubernetesClusterVmMapDao.listByClusterId(DEFAULT_ID))
+            .thenReturn(Arrays.asList(etcd1, etcd2, control1, control2, worker));
+        Mockito.when(userVmDao.findById(3L)).thenReturn(vm3);
+        Mockito.when(userVmDao.findById(4L)).thenReturn(vm4);
+
+        List<UserVm> controlVms = actionWorker.getControlNodeVMs();
+
+        Assert.assertEquals(Arrays.asList(vm3, vm4), controlVms);
+    }
+
+    @Test
+    public void testGetControlNodeVMsReturnsEmptyWithoutMaps() {
+        Mockito.when(kubernetesClusterVmMapDao.listByClusterIdAndVmType(DEFAULT_ID, KubernetesClusterNodeType.CONTROL))
+            .thenReturn(Collections.emptyList());
+        Mockito.when(kubernetesClusterVmMapDao.listByClusterId(DEFAULT_ID)).thenReturn(Collections.emptyList());
+
+        Assert.assertTrue(actionWorker.getControlNodeVMs().isEmpty());
+    }
+
+    @Test
+    public void testGetControlNodeVMsSkipsMissingUserVms() {
+        UserVmVO vm20 = Mockito.mock(UserVmVO.class);
+        KubernetesClusterVmMapVO map10 = vmMap(10L);
+        KubernetesClusterVmMapVO map20 = vmMap(20L);
+        Mockito.when(kubernetesClusterVmMapDao.listByClusterIdAndVmType(DEFAULT_ID, KubernetesClusterNodeType.CONTROL))
+            .thenReturn(Arrays.asList(map10, map20));
+        Mockito.when(userVmDao.findById(20L)).thenReturn(vm20);
+
+        List<UserVm> controlVms = actionWorker.getControlNodeVMs();
+
+        Assert.assertEquals(Collections.singletonList(vm20), controlVms);
     }
 }
